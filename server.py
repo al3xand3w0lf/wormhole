@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import aiofiles
+
 from fastapi import FastAPI, HTTPException, Depends, Request, Query, status
 from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse, FileResponse
@@ -37,6 +39,7 @@ PORT = int(os.getenv("PORT", "8000"))
 SSL_CERTFILE = os.getenv("SSL_CERTFILE", str(BASE_DIR / "cert.pem"))
 SSL_KEYFILE = os.getenv("SSL_KEYFILE", str(BASE_DIR / "key.pem"))
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50 MB
+WORKERS = int(os.getenv("WORKERS", "1"))
 
 BLOCKED_EXTENSIONS = {".exe", ".bat", ".sh", ".cmd", ".scr", ".com", ".pif"}
 
@@ -142,13 +145,13 @@ async def upload(
 
     try:
         total = 0
-        with open(file_path, "wb") as f:
+        async with aiofiles.open(file_path, "wb") as f:
             async for chunk in request.stream():
                 total += len(chunk)
                 if total > MAX_FILE_SIZE:
                     file_path.unlink(missing_ok=True)
                     raise HTTPException(status_code=413, detail="File too large")
-                f.write(chunk)
+                await f.write(chunk)
                 if content_length and total >= content_length:
                     break  # All declared bytes received, respond immediately
 
@@ -235,10 +238,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     kwargs = {
-        "app": app,
+        # String import path required when workers > 1 (uvicorn multiprocessing)
+        "app": "server:app" if WORKERS > 1 else app,
         "host": args.host,
         "port": args.port,
         "log_config": None,
+        "workers": WORKERS if WORKERS > 1 else None,
     }
 
     cert = Path(SSL_CERTFILE)
