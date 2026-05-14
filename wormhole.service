@@ -1,0 +1,14 @@
+[Unit]
+Description=Wormhole Quectel Modem File Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=<INSTALL_DIR>
+ExecStart=<INSTALL_DIR>/venv/bin/python3 server.py --no-ssl
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

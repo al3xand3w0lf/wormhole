@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+cert.pem
+key.pem
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Data directories
+data/incoming/*
+data/outgoing/*
+!data/incoming/.gitkeep
+!data/outgoing/.gitkeep
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
