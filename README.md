@@ -1,12 +1,12 @@
 # Wormhole
 
-HTTP(S) file server for Quectel LTE modems (EC2x, EG9x, EM05).
+HTTP(S) file server for IoT devices.
 
-Receives and serves files via raw HTTP — optimized for the Quectel AT command HTTP stack (`AT+QHTTPPOST` / `AT+QHTTPGET`), no multipart/form-data required.
+Receives and serves files via raw HTTP POST/GET — no multipart/form-data required.
 
 ## Features
 
-- Raw binary upload/download (compatible with Quectel HTTP AT commands)
+- Raw binary upload/download
 - API key authentication (`X-API-Key` header)
 - Optional HTTPS with self-signed or Let's Encrypt certificates
 - File collision handling (automatic rename)
@@ -63,7 +63,7 @@ See [.env.example](.env.example) for all options:
 | `MAX_FILE_SIZE` | `52428800` | Max upload size (50 MB) |
 | `LOG_FILE` | `./server.log` | Log file path |
 
-## Quectel Modem Usage
+## IoT Device Usage
 
 ### Upload (Modem → Server)
 

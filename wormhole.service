@@ -1,5 +1,5 @@
 [Unit]
-Description=Wormhole Quectel Modem File Server
+Description=Wormhole IoT File Server
 After=network.target
 
 [Service]
