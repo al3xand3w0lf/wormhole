@@ -104,22 +104,20 @@ curl "https://<host>:<port>/uploads"        -H "X-API-Key: <key>"   # received u
 
 ## Testing
 
-Two small stdlib-only clients are included to exercise a running server:
+Two self-contained clients (Python standard library only, no `.env`) let you
+test a running server from any machine. Edit `SERVER_URL`, `API_KEY` and
+`VERIFY_TLS` at the top of each script, then:
 
 ```bash
-# Upload a generated test file (and list the server's uploads)
-python test_upload.py --url http://127.0.0.1:8000 --api-key <key> --list
+python test_upload.py              # upload a generated test file
+python test_upload.py --file mydata.bin
+python test_upload.py --list       # also list the server's uploads
 
-# Upload an existing file
-python test_upload.py --file mydata.bin --api-key <key>
-
-# List downloadable files, then fetch one
-python test_download.py --api-key <key>
-python test_download.py --filename config.bin --api-key <key> --out ./config.bin
+python test_download.py            # list available downloads
+python test_download.py --filename config.bin --out ./config.bin
 ```
 
-Add `--insecure` for HTTPS with a self-signed certificate. Both scripts resolve
-the API key from `--api-key`, the `API_KEY` env var, or a local `.env`.
+Set `VERIFY_TLS = False` in the script for a self-signed HTTPS certificate.
 
 ## Project Structure
 
