@@ -11,7 +11,10 @@ Receives and serves files via raw HTTP POST/GET — no multipart/form-data requi
 - Optional HTTPS with self-signed or Let's Encrypt certificates
 - File collision handling (automatic rename)
 - Filename sanitization and extension blocking
-- Request logging to file and stdout
+- Per-request IDs (`X-Request-ID` header, included in every log line)
+- Separate rotating logs: operational (`server.log`) and access (`server.access.log`), also on stdout
+- Upload chunk timeout — drops stalled transfers with HTTP 408
+- Simple HTTP API usable with any client (`curl`, scripts, IoT devices)
 
 ## API Endpoints
 
@@ -21,7 +24,7 @@ Receives and serves files via raw HTTP POST/GET — no multipart/form-data requi
 | `POST` | `/modem/upload?device_id=X&filename=Y` | Upload file (raw binary body) | Yes |
 | `GET` | `/modem/download/{filename}` | Download file (octet-stream) | Yes |
 | `GET` | `/modem/download` | List available downloads | Yes |
-| `GET` | `/modem/uploads` | List received uploads | Yes |
+| `GET` | `/uploads` | List received uploads | Yes |
 
 ## Setup
 
@@ -61,42 +64,43 @@ See [.env.example](.env.example) for all options:
 | `SSL_CERTFILE` | `./cert.pem` | SSL certificate path |
 | `SSL_KEYFILE` | `./key.pem` | SSL private key path |
 | `MAX_FILE_SIZE` | `52428800` | Max upload size (50 MB) |
-| `LOG_FILE` | `./server.log` | Log file path |
+| `UPLOAD_CHUNK_TIMEOUT` | `30` | Per-chunk read timeout in seconds (HTTP 408 on stall) |
+| `LOG_FILE` | `./server.log` | Operational log (events + 4xx/5xx on real endpoints) |
+| `ACCESS_LOG_FILE` | `./server.access.log` | Access log (one line per request) |
+| `LOG_MAX_BYTES` | `10485760` | Max bytes per log file before rotation (10 MB) |
+| `LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 
-## IoT Device Usage
+## Usage
 
-### Upload (Modem → Server)
+Authentication is via the `X-API-Key` header on every endpoint except `/health`.
+The examples below use `curl`; any HTTP client — or an IoT device capable of raw
+HTTP POST/GET — works the same way.
 
+### Upload a file (raw binary body)
+
+```bash
+curl -X POST "https://<host>:<port>/modem/upload?device_id=device01&filename=data.bin" \
+     -H "X-API-Key: <key>" \
+     -H "Content-Type: application/octet-stream" \
+     --data-binary @data.bin
 ```
-AT+QHTTPCFG="contextid",1
-AT+QHTTPCFG="requestheader",1
-AT+QHTTPURL=<url_len>
-http://<host>:<port>/modem/upload?device_id=10000002&filename=data.ubx
 
-AT+QHTTPPOST=<filesize>,120,80
-POST /modem/upload?device_id=10000002&filename=data.ubx HTTP/1.1
-Host: <host>:<port>
-X-API-Key: <key>
-Content-Type: application/octet-stream
-Content-Length: <filesize>
+### Download a file
 
-<binary data>
+```bash
+curl "https://<host>:<port>/modem/download/config.bin" \
+     -H "X-API-Key: <key>" \
+     -o config.bin
 ```
 
-### Download (Server → Modem)
+### List files
 
+```bash
+curl "https://<host>:<port>/modem/download" -H "X-API-Key: <key>"   # available downloads
+curl "https://<host>:<port>/uploads"        -H "X-API-Key: <key>"   # received uploads
 ```
-AT+QHTTPCFG="requestheader",1
-AT+QHTTPURL=<url_len>
-http://<host>:<port>/modem/download/config.bin
 
-AT+QHTTPGET=80,<header_len>
-GET /modem/download/config.bin HTTP/1.1
-Host: <host>:<port>
-X-API-Key: <key>
-
-AT+QHTTPREADFILE="UFS:config.bin",80
-```
+> For plain HTTP (no TLS), use `http://` and start the server with `--no-ssl`.
 
 ## Project Structure
 
@@ -108,7 +112,6 @@ wormhole/
 ├── generate-ssl.sh                  # SSL certificate generator
 ├── wormhole.service                 # systemd service template
 ├── server-deployment.md             # Server setup guide
-├── modem-client-implementation.md   # IoT / AT command guide
 └── data/
     ├── incoming/                    # Received uploads
     └── outgoing/                    # Files available for download
