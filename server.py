@@ -12,8 +12,13 @@ Usage:
 """
 
 import os
+import asyncio
+import contextvars
 import logging
+import secrets
+import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -34,11 +39,15 @@ API_KEY = os.getenv("API_KEY", "changeme")
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "data" / "incoming"))
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", BASE_DIR / "data" / "outgoing"))
 LOG_FILE = os.getenv("LOG_FILE", str(BASE_DIR / "server.log"))
+ACCESS_LOG_FILE = os.getenv("ACCESS_LOG_FILE", str(BASE_DIR / "server.access.log"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 SSL_CERTFILE = os.getenv("SSL_CERTFILE", str(BASE_DIR / "cert.pem"))
 SSL_KEYFILE = os.getenv("SSL_KEYFILE", str(BASE_DIR / "key.pem"))
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50 MB
+UPLOAD_CHUNK_TIMEOUT = int(os.getenv("UPLOAD_CHUNK_TIMEOUT", "30"))  # seconds per chunk read
 WORKERS = int(os.getenv("WORKERS", "1"))
 
 BLOCKED_EXTENSIONS = {".exe", ".bat", ".sh", ".cmd", ".scr", ".com", ".pif"}
@@ -47,22 +56,54 @@ BLOCKED_EXTENSIONS = {".exe", ".bat", ".sh", ".cmd", ".scr", ".com", ".pif"}
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(),
-    ],
+# --- Logging: per-request IDs + rotating files ---
+
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class RequestIdFilter(logging.Filter):
+    """Injects the current request ID into every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get()
+        return True
+
+
+def _build_logger(name: str, filename: str, fmt: str) -> logging.Logger:
+    lg = logging.getLogger(name)
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    lg.handlers.clear()
+    formatter = logging.Formatter(fmt)
+    rid_filter = RequestIdFilter()
+    handlers = [
+        RotatingFileHandler(filename, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT),
+        logging.StreamHandler(),  # also to stdout for journald
+    ]
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        handler.addFilter(rid_filter)
+        lg.addHandler(handler)
+    return lg
+
+
+# server.log -> operational events (uploads/downloads, warnings, errors, lifecycle)
+#               plus 4xx/5xx on real endpoints
+logger = _build_logger(
+    "iot-server", LOG_FILE,
+    "%(asctime)s - %(levelname)s - [req:%(request_id)s] - %(message)s",
 )
-logger = logging.getLogger("iot-server")
+# server.access.log -> every HTTP request (one line each)
+access_logger = _build_logger(
+    "iot-access", ACCESS_LOG_FILE,
+    "%(asctime)s - [req:%(request_id)s] - %(message)s",
+)
 
 # FastAPI app
 app = FastAPI(
     title="IoT File Server",
     description="HTTP(S) file server for IoT devices",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # API key auth
@@ -89,13 +130,34 @@ def _sanitize_filename(filename: str) -> str:
 
 # --- Middleware ---
 
+# Real application endpoints — anything else is treated as scanner/noise traffic
+def _is_real_endpoint(path: str) -> bool:
+    return path == "/health" or path == "/uploads" or path.startswith("/modem/")
+
+
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start = datetime.now(timezone.utc)
-    response = await call_next(request)
-    dt = (datetime.now(timezone.utc) - start).total_seconds()
-    logger.info(f"{request.method} {request.url.path} from {request.client.host} -> {response.status_code} ({dt:.3f}s)")
-    return response
+async def request_context(request: Request, call_next):
+    rid = secrets.token_hex(4)
+    token = request_id_ctx.set(rid)
+    start = time.perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration = time.perf_counter() - start
+        client = request.client.host if request.client else "-"
+        status_code = response.status_code if response is not None else 500
+        line = f"{request.method} {request.url.path} from {client} -> {status_code} ({duration:.3f}s)"
+        # Every request → access log
+        access_logger.info(line)
+        # Operational log: only real endpoints with errors, plus all 5xx —
+        # keeps server.log free of internet-scanner noise
+        if status_code >= 500 or (status_code >= 400 and _is_real_endpoint(request.url.path)):
+            logger.warning(line)
+        if response is not None:
+            response.headers["X-Request-ID"] = rid
+        request_id_ctx.reset(token)
 
 
 # --- Endpoints ---
@@ -145,8 +207,20 @@ async def upload(
 
     try:
         total = 0
+        stream = request.stream().__aiter__()
         async with aiofiles.open(file_path, "wb") as f:
-            async for chunk in request.stream():
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        stream.__anext__(), timeout=UPLOAD_CHUNK_TIMEOUT
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    # Modem froze mid-transfer — drop the partial file instead of
+                    # blocking the coroutine until the OS TCP timeout (minutes)
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=408, detail="Upload timed out")
                 total += len(chunk)
                 if total > MAX_FILE_SIZE:
                     file_path.unlink(missing_ok=True)
