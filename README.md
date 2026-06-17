@@ -102,6 +102,25 @@ curl "https://<host>:<port>/uploads"        -H "X-API-Key: <key>"   # received u
 
 > For plain HTTP (no TLS), use `http://` and start the server with `--no-ssl`.
 
+## Testing
+
+Two small stdlib-only clients are included to exercise a running server:
+
+```bash
+# Upload a generated test file (and list the server's uploads)
+python test_upload.py --url http://127.0.0.1:8000 --api-key <key> --list
+
+# Upload an existing file
+python test_upload.py --file mydata.bin --api-key <key>
+
+# List downloadable files, then fetch one
+python test_download.py --api-key <key>
+python test_download.py --filename config.bin --api-key <key> --out ./config.bin
+```
+
+Add `--insecure` for HTTPS with a self-signed certificate. Both scripts resolve
+the API key from `--api-key`, the `API_KEY` env var, or a local `.env`.
+
 ## Project Structure
 
 ```
@@ -112,6 +131,8 @@ wormhole/
 ├── generate-ssl.sh                  # SSL certificate generator
 ├── wormhole.service                 # systemd service template
 ├── server-deployment.md             # Server setup guide
+├── test_upload.py                   # Upload test client
+├── test_download.py                 # Download test client
 └── data/
     ├── incoming/                    # Received uploads
     └── outgoing/                    # Files available for download
