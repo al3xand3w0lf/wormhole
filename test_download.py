@@ -16,7 +16,7 @@ CONFIG values below, then run it.
 # ═══════════════════════════════════════════════════════════════════════
 SERVER_URL = "http://127.0.0.1:8000"   # http(s)://<ip-or-host>:<port>
 API_KEY    = "changeme"                 # API key configured on the server
-VERIFY_TLS = True                       # set False for self-signed HTTPS certs
+VERIFY_TLS = False                      # ignored for http; set True to verify a real HTTPS cert
 # ═══════════════════════════════════════════════════════════════════════
 
 import argparse
