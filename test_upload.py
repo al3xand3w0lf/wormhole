@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-test_upload.py — simple upload test client for the IoT File Server.
+test_upload.py — standalone upload tester for a wormhole / IoT File Server.
 
-Uploads a file to the server's `POST /modem/upload` endpoint (raw binary body)
-and prints the result. If no file is given, a small test file is generated, so
-you can verify a fresh deployment with a single command.
+Self-contained: no .env and no third-party packages (Python standard library
+only). Copy this file onto any machine that can reach the server, edit the three
+CONFIG values below, then run it.
 
-Examples:
-    python test_upload.py                          # generate a test file, upload to localhost:8000
-    python test_upload.py --file mydata.bin        # upload an existing file
-    python test_upload.py --url https://host:8443 --insecure   # HTTPS with a self-signed cert
-    python test_upload.py --list                   # also list the server's uploads afterwards
-
-The API key is resolved from (in order): --api-key, the API_KEY environment
-variable, an API_KEY=... line in a local .env file, then the default "changeme".
+    python test_upload.py                  # upload a generated test file
+    python test_upload.py --file data.bin  # upload an existing file
+    python test_upload.py --list           # also list the server's uploads
 """
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CONFIG — edit these to match your wormhole server
+# ═══════════════════════════════════════════════════════════════════════
+SERVER_URL = "http://127.0.0.1:8000"   # http(s)://<ip-or-host>:<port>
+API_KEY    = "changeme"                 # API key configured on the server
+VERIFY_TLS = True                       # set False for self-signed HTTPS certs
+# ═══════════════════════════════════════════════════════════════════════
 
 import argparse
 import json
@@ -29,24 +32,9 @@ from pathlib import Path
 from typing import Optional
 
 
-def resolve_api_key(explicit: Optional[str]) -> str:
-    """Find the API key from CLI arg, environment, or a local .env file."""
-    if explicit:
-        return explicit
-    if os.getenv("API_KEY"):
-        return os.environ["API_KEY"]
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.exists():
-        for raw in env_path.read_text().splitlines():
-            line = raw.strip()
-            if line.startswith("API_KEY=") and not line.startswith("#"):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return "changeme"
-
-
-def make_ssl_context(insecure: bool) -> Optional[ssl.SSLContext]:
-    """Return an SSL context that skips verification (for self-signed certs)."""
-    if not insecure:
+def ssl_context() -> Optional[ssl.SSLContext]:
+    """Skip certificate verification when VERIFY_TLS is False (self-signed certs)."""
+    if VERIFY_TLS:
         return None
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -66,26 +54,23 @@ def generate_test_payload(device_id: str) -> bytes:
     return text.encode("utf-8")
 
 
-def upload(url: str, api_key: str, device_id: str, filename: str,
-           data: bytes, context: Optional[ssl.SSLContext]):
+def upload(device_id: str, filename: str, data: bytes,
+           context: Optional[ssl.SSLContext]):
     query = urllib.parse.urlencode({"device_id": device_id, "filename": filename})
-    endpoint = f"{url.rstrip('/')}/modem/upload?{query}"
+    endpoint = f"{SERVER_URL.rstrip('/')}/modem/upload?{query}"
     req = urllib.request.Request(
         endpoint,
         data=data,
         method="POST",
-        headers={
-            "X-API-Key": api_key,
-            "Content-Type": "application/octet-stream",
-        },
+        headers={"X-API-Key": API_KEY, "Content-Type": "application/octet-stream"},
     )
     with urllib.request.urlopen(req, context=context, timeout=60) as resp:
         return resp.status, resp.headers, resp.read().decode("utf-8", "replace")
 
 
-def list_uploads(url: str, api_key: str, context: Optional[ssl.SSLContext]) -> str:
+def list_uploads(context: Optional[ssl.SSLContext]) -> str:
     req = urllib.request.Request(
-        f"{url.rstrip('/')}/uploads", headers={"X-API-Key": api_key}
+        f"{SERVER_URL.rstrip('/')}/uploads", headers={"X-API-Key": API_KEY}
     )
     with urllib.request.urlopen(req, context=context, timeout=30) as resp:
         return resp.read().decode("utf-8", "replace")
@@ -93,27 +78,21 @@ def list_uploads(url: str, api_key: str, context: Optional[ssl.SSLContext]) -> s
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Upload a test file to the IoT File Server.",
+        description="Upload a test file to a wormhole / IoT File Server "
+                    "(configure SERVER_URL/API_KEY at the top of this file).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--url", default="http://127.0.0.1:8000",
-                        help="Base server URL")
-    parser.add_argument("--api-key", default=None,
-                        help="API key (default: API_KEY env / .env / 'changeme')")
-    parser.add_argument("--device-id", default="testdevice",
-                        help="device_id query parameter")
     parser.add_argument("--file", default=None,
                         help="Path to an existing file to upload (default: generate one)")
     parser.add_argument("--filename", default=None,
                         help="Target filename on the server (default: derived)")
-    parser.add_argument("--insecure", action="store_true",
-                        help="Skip TLS certificate verification (self-signed certs)")
+    parser.add_argument("--device-id", default="testdevice",
+                        help="device_id query parameter")
     parser.add_argument("--list", action="store_true",
                         help="List the server's uploads after the upload")
     args = parser.parse_args()
 
-    api_key = resolve_api_key(args.api_key)
-    context = make_ssl_context(args.insecure)
+    context = ssl_context()
 
     if args.file:
         path = Path(args.file)
@@ -128,19 +107,16 @@ def main() -> int:
         filename = args.filename or f"testfile_{ts}.txt"
 
     print(f"Uploading {len(data):,} bytes as '{filename}' "
-          f"(device_id={args.device_id}) -> {args.url}/modem/upload")
+          f"(device_id={args.device_id}) -> {SERVER_URL}/modem/upload")
 
     try:
-        status, headers, body = upload(
-            args.url, api_key, args.device_id, filename, data, context
-        )
+        status, headers, body = upload(args.device_id, filename, data, context)
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")
         print(f"FAILED: HTTP {e.code} {e.reason}", file=sys.stderr)
-        print(detail, file=sys.stderr)
+        print(e.read().decode("utf-8", "replace"), file=sys.stderr)
         return 1
     except urllib.error.URLError as e:
-        print(f"FAILED: could not reach server: {e.reason}", file=sys.stderr)
+        print(f"FAILED: could not reach {SERVER_URL}: {e.reason}", file=sys.stderr)
         return 1
 
     print(f"OK: HTTP {status}")
@@ -154,7 +130,7 @@ def main() -> int:
     if args.list:
         print("\nServer uploads:")
         try:
-            print(list_uploads(args.url, api_key, context))
+            print(list_uploads(context))
         except urllib.error.URLError as e:
             print(f"(could not list uploads: {e})", file=sys.stderr)
 

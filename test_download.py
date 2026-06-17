@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-test_download.py — simple download test client for the IoT File Server.
+test_download.py — standalone download tester for a wormhole / IoT File Server.
 
-Lists the files the server offers for download, or fetches one of them via the
-`GET /modem/download/{filename}` endpoint and saves it locally.
+Self-contained: no .env and no third-party packages (Python standard library
+only). Copy this file onto any machine that can reach the server, edit the three
+CONFIG values below, then run it.
 
-Examples:
     python test_download.py                          # list available downloads
     python test_download.py --filename config.bin    # download to ./config.bin
     python test_download.py --filename config.bin --out /tmp/cfg.bin
-    python test_download.py --url https://host:8443 --insecure --list
-
-The API key is resolved from (in order): --api-key, the API_KEY environment
-variable, an API_KEY=... line in a local .env file, then the default "changeme".
 """
 
+# ═══════════════════════════════════════════════════════════════════════
+#  CONFIG — edit these to match your wormhole server
+# ═══════════════════════════════════════════════════════════════════════
+SERVER_URL = "http://127.0.0.1:8000"   # http(s)://<ip-or-host>:<port>
+API_KEY    = "changeme"                 # API key configured on the server
+VERIFY_TLS = True                       # set False for self-signed HTTPS certs
+# ═══════════════════════════════════════════════════════════════════════
+
 import argparse
-import json
 import os
 import ssl
 import sys
@@ -27,24 +30,9 @@ from pathlib import Path
 from typing import Optional
 
 
-def resolve_api_key(explicit: Optional[str]) -> str:
-    """Find the API key from CLI arg, environment, or a local .env file."""
-    if explicit:
-        return explicit
-    if os.getenv("API_KEY"):
-        return os.environ["API_KEY"]
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.exists():
-        for raw in env_path.read_text().splitlines():
-            line = raw.strip()
-            if line.startswith("API_KEY=") and not line.startswith("#"):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return "changeme"
-
-
-def make_ssl_context(insecure: bool) -> Optional[ssl.SSLContext]:
-    """Return an SSL context that skips verification (for self-signed certs)."""
-    if not insecure:
+def ssl_context() -> Optional[ssl.SSLContext]:
+    """Skip certificate verification when VERIFY_TLS is False (self-signed certs)."""
+    if VERIFY_TLS:
         return None
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -52,70 +40,63 @@ def make_ssl_context(insecure: bool) -> Optional[ssl.SSLContext]:
     return ctx
 
 
-def list_downloads(url: str, api_key: str, context: Optional[ssl.SSLContext]) -> str:
+def list_downloads(context: Optional[ssl.SSLContext]) -> str:
     req = urllib.request.Request(
-        f"{url.rstrip('/')}/modem/download", headers={"X-API-Key": api_key}
+        f"{SERVER_URL.rstrip('/')}/modem/download", headers={"X-API-Key": API_KEY}
     )
     with urllib.request.urlopen(req, context=context, timeout=30) as resp:
         return resp.read().decode("utf-8", "replace")
 
 
-def download(url: str, api_key: str, filename: str,
-             context: Optional[ssl.SSLContext]):
-    endpoint = f"{url.rstrip('/')}/modem/download/{urllib.parse.quote(filename)}"
-    req = urllib.request.Request(endpoint, headers={"X-API-Key": api_key})
+def download(filename: str, context: Optional[ssl.SSLContext]):
+    endpoint = f"{SERVER_URL.rstrip('/')}/modem/download/{urllib.parse.quote(filename)}"
+    req = urllib.request.Request(endpoint, headers={"X-API-Key": API_KEY})
     with urllib.request.urlopen(req, context=context, timeout=60) as resp:
         return resp.status, resp.headers, resp.read()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Download a file from the IoT File Server.",
+        description="Download a file from a wormhole / IoT File Server "
+                    "(configure SERVER_URL/API_KEY at the top of this file).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--url", default="http://127.0.0.1:8000",
-                        help="Base server URL")
-    parser.add_argument("--api-key", default=None,
-                        help="API key (default: API_KEY env / .env / 'changeme')")
     parser.add_argument("--filename", default=None,
                         help="File to download (omit to just list available files)")
     parser.add_argument("--out", default=None,
                         help="Local path to save to (default: ./<filename>)")
-    parser.add_argument("--insecure", action="store_true",
-                        help="Skip TLS certificate verification (self-signed certs)")
     parser.add_argument("--list", action="store_true",
                         help="List available downloads (implied when no --filename)")
     args = parser.parse_args()
 
-    api_key = resolve_api_key(args.api_key)
-    context = make_ssl_context(args.insecure)
+    context = ssl_context()
 
     # No filename -> just list what the server offers.
     if not args.filename or args.list:
         print("Available downloads:")
         try:
-            print(list_downloads(args.url, api_key, context))
+            print(list_downloads(context))
         except urllib.error.HTTPError as e:
             print(f"FAILED: HTTP {e.code} {e.reason}", file=sys.stderr)
             print(e.read().decode("utf-8", "replace"), file=sys.stderr)
             return 1
         except urllib.error.URLError as e:
-            print(f"FAILED: could not reach server: {e.reason}", file=sys.stderr)
+            print(f"FAILED: could not reach {SERVER_URL}: {e.reason}", file=sys.stderr)
             return 1
         if not args.filename:
             return 0
 
     out_path = Path(args.out) if args.out else Path(args.filename)
-    print(f"\nDownloading '{args.filename}' from {args.url}/modem/download/ -> {out_path}")
+    print(f"\nDownloading '{args.filename}' from {SERVER_URL}/modem/download/ -> {out_path}")
 
     try:
-        status, headers, data = download(args.url, api_key, args.filename, context)
+        status, headers, data = download(args.filename, context)
     except urllib.error.HTTPError as e:
         print(f"FAILED: HTTP {e.code} {e.reason}", file=sys.stderr)
         print(e.read().decode("utf-8", "replace"), file=sys.stderr)
         return 1
     except urllib.error.URLError as e:
-        print(f"FAILED: could not reach server: {e.reason}", file=sys.stderr)
+        print(f"FAILED: could not reach {SERVER_URL}: {e.reason}", file=sys.stderr)
         return 1
 
     out_path.write_bytes(data)
