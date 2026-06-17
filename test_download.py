@@ -2,9 +2,18 @@
 """
 test_download.py — standalone download tester for a wormhole / IoT File Server.
 
-Self-contained: no .env and no third-party packages (Python standard library
-only). Copy this file onto any machine that can reach the server, edit the three
-CONFIG values below, then run it.
+Lists or fetches files the server offers via `GET /modem/download`. Downloads
+are served from the server's download directory (data/outgoing).
+
+What gets downloaded:
+  - by default (no --filename): nothing is downloaded — the script only prints
+    the list of files currently available on the server.
+  - with --filename NAME: that one file is downloaded and saved to ./NAME
+    (or to the path given with --out).
+
+Self-contained: Python standard library only, no .env and no extra packages.
+Copy this file onto any machine that can reach the server, edit the CONFIG
+block below (SERVER_URL, API_KEY, VERIFY_TLS), then run:
 
     python test_download.py                          # list available downloads
     python test_download.py --filename config.bin    # download to ./config.bin

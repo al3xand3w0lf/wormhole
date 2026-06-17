@@ -2,12 +2,23 @@
 """
 test_upload.py — standalone upload tester for a wormhole / IoT File Server.
 
-Self-contained: no .env and no third-party packages (Python standard library
-only). Copy this file onto any machine that can reach the server, edit the three
-CONFIG values below, then run it.
+Sends a file to the server's `POST /modem/upload` endpoint (raw binary body).
+The file lands in the server's upload directory (data/incoming).
+
+What gets uploaded:
+  - by default (no --file): a small text file is generated on the fly, named
+    testfile_<timestamp>.txt, containing a timestamp, the device_id and a
+    random nonce — so you can test a server without preparing any file first.
+  - with --file PATH: that existing file is uploaded instead. Use --filename
+    to store it under a different name on the server.
+
+Self-contained: Python standard library only, no .env and no extra packages.
+Copy this file onto any machine that can reach the server, edit the CONFIG
+block below (SERVER_URL, API_KEY, VERIFY_TLS), then run:
 
     python test_upload.py                  # upload a generated test file
     python test_upload.py --file data.bin  # upload an existing file
+    python test_upload.py --file data.bin --filename target.bin  # rename on server
     python test_upload.py --list           # also list the server's uploads
 """
 
