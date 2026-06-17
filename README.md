@@ -117,7 +117,8 @@ python test_download.py            # list available downloads
 python test_download.py --filename config.bin --out ./config.bin
 ```
 
-Set `VERIFY_TLS = False` in the script for a self-signed HTTPS certificate.
+TLS verification is off by default (servers run over plain http); set
+`VERIFY_TLS = True` in the script for a server with a valid HTTPS certificate.
 
 ## Project Structure
 
