@@ -5,6 +5,7 @@ key.pem
 
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 

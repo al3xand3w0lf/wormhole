@@ -46,7 +46,14 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 SSL_CERTFILE = os.getenv("SSL_CERTFILE", str(BASE_DIR / "cert.pem"))
 SSL_KEYFILE = os.getenv("SSL_KEYFILE", str(BASE_DIR / "key.pem"))
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50 MB
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50 MB per single request/chunk
+# Chunked uploads (device splits a file too large for its modem buffer into
+# UFS-sized pieces that the server reassembles): the *reassembled* file may be
+# larger than a single chunk, so it has its own ceiling.
+MAX_ASSEMBLED_SIZE = int(os.getenv("MAX_ASSEMBLED_SIZE", str(500 * 1024 * 1024)))  # 500 MB
+# Abandoned .partial files (a device that never sent its final chunk) are swept
+# at startup once older than this.
+PARTIAL_MAX_AGE_H = int(os.getenv("PARTIAL_MAX_AGE_H", "48"))  # hours
 UPLOAD_CHUNK_TIMEOUT = int(os.getenv("UPLOAD_CHUNK_TIMEOUT", "30"))  # seconds per chunk read
 WORKERS = int(os.getenv("WORKERS", "1"))
 
@@ -99,11 +106,29 @@ access_logger = _build_logger(
     "%(asctime)s - [req:%(request_id)s] - %(message)s",
 )
 
+
+def _sweep_stale_partials() -> None:
+    """Remove abandoned <name>.partial reassembly files older than the max age.
+
+    A fresh upload of the same file re-truncates its own .partial (chunk 0 opens
+    'wb'), so this only reaps uploads a device gave up on entirely."""
+    cutoff = time.time() - PARTIAL_MAX_AGE_H * 3600
+    for p in UPLOAD_DIR.glob("*.partial"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+                logger.info(f"Removed stale partial: {p.name}")
+        except OSError:
+            pass
+
+
+_sweep_stale_partials()
+
 # FastAPI app
 app = FastAPI(
     title="IoT File Server",
     description="HTTP(S) file server for IoT devices",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 # API key auth
@@ -168,6 +193,105 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+async def _handle_chunk_upload(request, device_id, safe_name,
+                               chunk_index, chunk_count, offset, total_size):
+    """Reassemble a chunked upload by writing each chunk at its byte offset.
+
+    Contract (matches the device firmware): a non-final chunk is answered 202;
+    the final chunk (chunk_index == chunk_count - 1) is verified against
+    total_size and the .partial file is atomically renamed to the target name
+    (201). Chunk 0 truncates the .partial, so a full retry is idempotent; other
+    chunks seek to `offset`, so re-sending the same chunk is idempotent too.
+    """
+    if offset is None or total_size is None:
+        raise HTTPException(status_code=400, detail="chunked upload requires offset and total_size")
+    if chunk_index < 0 or chunk_index >= chunk_count or offset < 0 or total_size <= 0:
+        raise HTTPException(status_code=400, detail="invalid chunk parameters")
+    if total_size > MAX_ASSEMBLED_SIZE:
+        raise HTTPException(status_code=413,
+                            detail=f"assembled file too large ({total_size} > {MAX_ASSEMBLED_SIZE})")
+
+    is_final = (chunk_index == chunk_count - 1)
+    # Device-scoped partial name so two devices can never clash on the same target.
+    partial_path = UPLOAD_DIR / f"{safe_name}.{_sanitize_filename(device_id)}.partial"
+
+    if chunk_index == 0:
+        mode = "wb"          # first chunk creates/truncates
+    else:
+        if not partial_path.exists():
+            # Lost partial (server restart / swept) — device must restart from chunk 0.
+            logger.warning(f"Chunk {chunk_index} for {safe_name} but no .partial — request restart")
+            raise HTTPException(status_code=409, detail="partial missing, restart from chunk 0")
+        mode = "r+b"         # patch existing partial at offset
+
+    content_length = int(request.headers.get("content-length", 0))
+    written = 0
+    try:
+        async with aiofiles.open(partial_path, mode) as f:
+            await f.seek(offset)
+            stream = request.stream().__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=UPLOAD_CHUNK_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    raise HTTPException(status_code=408, detail="Upload timed out")
+                written += len(chunk)
+                if written > MAX_FILE_SIZE:
+                    raise HTTPException(status_code=413, detail="Chunk too large")
+                if offset + written > total_size:
+                    raise HTTPException(status_code=400, detail="chunk exceeds total_size")
+                await f.write(chunk)
+                if content_length and written >= content_length:
+                    break
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chunk upload error ({device_id}, {safe_name} #{chunk_index}): {e}")
+        raise HTTPException(status_code=500, detail="Server error")
+
+    if not is_final:
+        logger.info(f"Chunk {chunk_index + 1}/{chunk_count}: {safe_name} "
+                    f"(+{written:,} @ {offset:,}) from {device_id}")
+        return JSONResponse(status_code=202, content={
+            "status": "chunk_accepted",
+            "filename": safe_name,
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "offset": offset,
+            "received": written,
+        })
+
+    # Final chunk: verify the assembled size, then finalise.
+    actual = partial_path.stat().st_size
+    if actual != total_size:
+        logger.warning(f"Reassembled size mismatch for {safe_name}: "
+                       f"got {actual}, expected {total_size} (partial kept)")
+        raise HTTPException(status_code=422,
+                            detail=f"reassembled size {actual} != total_size {total_size}")
+
+    final_name = safe_name
+    final_path = UPLOAD_DIR / final_name
+    if final_path.exists():
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
+        ts = datetime.now(timezone.utc).strftime('%H%M%S_%f')[:-3]
+        final_name = f"{stem}_{ts}{suffix}"
+        final_path = UPLOAD_DIR / final_name
+        logger.warning(f"Collision on finalize, renamed to: {final_name}")
+
+    partial_path.replace(final_path)  # atomic on the same filesystem
+    logger.info(f"Reassembled OK: {final_name} ({actual:,} bytes, {chunk_count} chunks) from {device_id}")
+    return JSONResponse(status_code=201, content={
+        "status": "ok",
+        "filename": final_name,
+        "size": actual,
+        "device_id": device_id,
+        "chunks": chunk_count,
+    })
+
+
 # Upload: IoT device sends raw binary data
 @app.post("/modem/upload",
           status_code=status.HTTP_201_CREATED,
@@ -177,6 +301,10 @@ async def upload(
     request: Request,
     device_id: str = Query(..., description="Device ID"),
     filename: str = Query(..., description="Filename"),
+    chunk_index: Optional[int] = Query(None, description="0-based chunk index (chunked upload)"),
+    chunk_count: Optional[int] = Query(None, description="Total number of chunks"),
+    offset: Optional[int] = Query(None, description="Byte offset of this chunk in the assembled file"),
+    total_size: Optional[int] = Query(None, description="Full assembled file size in bytes"),
 ):
     """
     Receives raw binary data in the POST body.
@@ -184,12 +312,26 @@ async def upload(
     Query parameters:
     - device_id: device identifier (e.g. 10000002)
     - filename: target filename (e.g. 10000002_260306_1000.ubx)
+
+    Optional chunked upload (a file too large for the device's modem buffer):
+    - chunk_index / chunk_count / offset / total_size — each chunk's raw bytes are
+      written at `offset` into `<filename>.<device>.partial`. A non-final chunk is
+      answered 202 (Accepted); the final chunk is verified against total_size and
+      the partial is atomically renamed to the target name (201). Requests without
+      these params keep the original whole-file behaviour.
     """
     ext = Path(filename).suffix.lower()
     if ext in BLOCKED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File extension '{ext}' not allowed")
 
     safe_name = _sanitize_filename(filename)
+
+    # Chunked upload path (device split a file larger than its modem buffer).
+    if chunk_index is not None and chunk_count is not None and chunk_count > 1:
+        return await _handle_chunk_upload(
+            request, device_id, safe_name, chunk_index, chunk_count, offset, total_size
+        )
+
     file_path = UPLOAD_DIR / safe_name
 
     # avoid collision
