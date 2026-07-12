@@ -1,0 +1,104 @@
+"""Private 0xF0 frame decode/encode (the device's own protocol)."""
+
+import struct
+
+import pytest
+from pyubx2 import isvalid_checksum
+
+from streaming.frames import (
+    PRIVATE_CLASS,
+    ID_CMD_REQUEST,
+    ID_SENSOR_ADXL345,
+    ID_SENSOR_ADXL345_EXT,
+    ID_SENSOR_INA219,
+    ID_SENSOR_INA219_EXT,
+    ID_SENSOR_LPS28DFW,
+    ID_SENSOR_SHT4X,
+    CliResponse,
+    Heartbeat,
+    Ident,
+    SensorReading,
+    decode_private,
+    encode_cmd_request,
+    ubx_payload,
+)
+
+from .helpers import cli_response, heartbeat, ident, sensor
+
+
+def test_ident():
+    msg = decode_private(ident(1001))
+    assert msg == Ident(1001)
+
+
+def test_heartbeat():
+    assert decode_private(heartbeat()) == Heartbeat()
+
+
+def test_cli_response_flags():
+    assert decode_private(cli_response("part", False)) == CliResponse("part", False)
+    assert decode_private(cli_response("done\r\n", True)) == CliResponse("done\r\n", True)
+
+
+@pytest.mark.parametrize(
+    "msg_id,fmt,stream,values",
+    [
+        (ID_SENSOR_INA219, "<Iiii", "ina219", {"mV": 12345, "mA": -678, "mW": 9012}),
+        (ID_SENSOR_INA219_EXT, "<Iiii", "ina219ext", {"mV": 3300, "mA": 15, "mW": 49}),
+        (ID_SENSOR_ADXL345, "<Iiii", "accel", {"x_ug": -1000, "y_ug": 2000, "z_ug": 980000}),
+        (ID_SENSOR_ADXL345_EXT, "<Iiii", "accelext", {"x_ug": 1, "y_ug": -2, "z_ug": 3}),
+        (ID_SENSOR_SHT4X, "<Iii", "sht4x", {"temp_mC": 21500, "rh_mpct": 45300}),
+        (ID_SENSOR_LPS28DFW, "<Iii", "lps28", {"press_Pa": 101325, "temp_mC": 20100}),
+    ],
+)
+def test_sensor_decode(msg_id, fmt, stream, values):
+    raw = sensor(msg_id, fmt, 1_783_000_000, *values.values())
+    msg = decode_private(raw)
+    assert isinstance(msg, SensorReading)
+    assert msg.stream == stream
+    assert msg.rtc_unix == 1_783_000_000
+    assert msg.values == values
+
+
+def test_internal_and_external_are_distinguishable():
+    """Internal and external sensors must not collide on the server."""
+    a = decode_private(sensor(ID_SENSOR_INA219, "<Iiii", 1, 1, 2, 3))
+    b = decode_private(sensor(ID_SENSOR_INA219_EXT, "<Iiii", 1, 1, 2, 3))
+    assert a.stream != b.stream
+
+
+def test_unknown_id_returns_none():
+    from streaming.frames import build_ubx
+
+    assert decode_private(build_ubx(PRIVATE_CLASS, 0x7E, b"\x00")) is None
+
+
+def test_truncated_sensor_payload_returns_none():
+    from streaming.frames import build_ubx
+
+    assert decode_private(build_ubx(PRIVATE_CLASS, ID_SENSOR_INA219, b"\x01\x02")) is None
+
+
+class TestCmdRequest:
+    def test_checksum_is_valid(self):
+        raw = encode_cmd_request("sysinfo", "s3cret")
+        assert isvalid_checksum(raw)
+        assert raw[2] == PRIVATE_CLASS
+        assert raw[3] == ID_CMD_REQUEST
+
+    def test_token_layout(self):
+        raw = encode_cmd_request("sysinfo", "s3cret")
+        payload = ubx_payload(raw)
+        assert payload[0] == 6  # tok_len
+        assert payload[1:7] == b"s3cret"
+        assert payload[7:] == b"sysinfo"
+
+    def test_empty_token_still_sends_length_prefix(self):
+        """The device always strips a tok_len byte, so it must always be present."""
+        payload = ubx_payload(encode_cmd_request("whoami", ""))
+        assert payload[0] == 0
+        assert payload[1:] == b"whoami"
+
+    def test_oversized_token_rejected(self):
+        with pytest.raises(ValueError):
+            encode_cmd_request("whoami", "x" * 256)

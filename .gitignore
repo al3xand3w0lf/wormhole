@@ -8,12 +8,15 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Data directories
 data/incoming/*
 data/outgoing/*
+data/incoming_stream/*
 !data/incoming/.gitkeep
 !data/outgoing/.gitkeep
+!data/incoming_stream/.gitkeep
 
 # Logs
 *.log

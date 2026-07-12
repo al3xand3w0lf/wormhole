@@ -1,5 +1,20 @@
 # Wormhole
 
+Two **independent** servers for two ways an IoT device can deliver data. They share
+this repo, the `.env` and the `data/` tree, but run as **separate processes / systemd
+services** and do not import each other.
+
+| Mode | What the device does | Server | Ports | Entry point |
+|---|---|---|---|---|
+| **Batch** | uploads finished files over HTTP | file server | 8000 | `server.py` |
+| **Streaming** | live TCP byte stream | stream receiver | 9000 (TCP) + 9001 (admin) | `streaming_server.py` |
+
+Run one, or both. → [Streaming Server](#streaming-server) (jump to the second half)
+
+---
+
+# Batch File Server (`server.py`)
+
 HTTP(S) file server for IoT devices.
 
 Receives and serves files via raw HTTP POST/GET — no multipart/form-data required.
@@ -165,22 +180,215 @@ pip install fastapi aiofiles python-dotenv httpx uvicorn
 python test_chunk_upload.py        # 202/201 contract, byte-identical reassembly, idempotency, error cases
 ```
 
+---
+
+# Streaming Server
+
+`streaming_server.py` — receives a **live TCP byte stream** from devices instead of
+finished file uploads.
+
+The device is a **thin, framed pipe**: it tees a raw binary stream (here: u-blox GNSS
+data — UBX + RTCM3) straight off its receiver and interleaves its own private frames
+(sensor readings, identification, heartbeat, CLI) over **one persistent TCP socket per
+station**. All protocol intelligence lives on the server.
+
+```bash
+pip install -r requirements-dev.txt
+cp .env.example .env          # set API_KEY and STREAM_CLI_SECRET
+python3 streaming_server.py   # TCP :9000 (data) + HTTP :9001 (admin)
+pytest                        # 135 tests
+```
+
+## What it does
+
+- **Demuxes** the byte stream: UBX → `.ubx`, RTCM3 → `.rtcm3`, private frames → sensor
+  CSVs / CLI / identification.
+- **Records** everything to per-station files, rotated hourly on the **GNSS clock**.
+- **Captures the raw stream** byte-exactly, so any session can be replayed offline.
+- **Sends CLI commands** to a device and returns its response (admin API).
+
+## Output layout
+
+```
+data/incoming_stream/<stationId>/
+    ubx/       <station>_ubx_YYYYMMDD_HH.ubx        hourly, GNSS-time hour
+    rtcm3/     <station>_rtcm3_YYYYMMDD_HH.rtcm3    hourly
+    sensors/   <station>_<stream>_YYYYMMDD.csv      daily
+    raw/       <station>_raw_YYYYMMDD_HH.bin        byte-exact capture (replay.py)
+    cli/       <station>_cli_YYYYMMDD.log
+```
+
+CSV columns: `rtc_unix, gps_iso, utc_iso, leap_s, <values…>`
+
+Rotation happens on the **GNSS hour change**, and only ever on a **frame boundary** —
+a message split across two files would be unparseable in *both*. Before the first GNSS
+fix the server clock is used and the filename says so (`_sysclk` suffix).
+
+## ⚠️ GPS time vs UTC
+
+GPS time runs ahead of UTC by the accumulated leap seconds (currently 18 s). A device
+that derives its calendar straight from the GPS epoch — as the reference firmware does —
+therefore timestamps everything in **GPS time, not UTC**, even though `leapS` is
+available in `UBX-RXM-RAWX`.
+
+This server **reproduces the device's convention deliberately**, so that recorded file
+hour boundaries line up with the device's own. It records `leapS` and adds a `utc_iso`
+column to the sensor CSVs, so true UTC is always available.
+
+If your device already corrects for leap seconds, adjust
+`streaming/gpstime.py::gps_to_datetime()` — it is the single place this decision lives,
+and `tests/test_gpstime.py` pins it.
+
+## Admin / CLI API (`:9001`, `X-API-Key`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check (no auth) |
+| `GET` | `/stream/stations` | Connected stations: GNSS clock, frame counters, resyncs, RTCM3 type histogram |
+| `POST` | `/stream/{station_id}/cli` | Send a CLI command, get the reassembled response |
+
+```bash
+curl -H "X-API-Key: <key>" http://<host>:9001/stream/stations
+
+curl -X POST http://<host>:9001/stream/1001/cli \
+     -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+     -d '{"cmd": "sysinfo"}'
+```
+
+`/stream/stations` includes an **RTCM3 message-type histogram** — the quickest way to
+confirm an RTK base is really emitting `1005` + MSM7 + `1230`:
+
+```json
+"rtcm3_types": {"1005": 42, "1077": 42, "1230": 42}
+```
+
+### CLI security
+
+Two independent layers:
+1. The **device** enforces a positive allowlist. Nothing else is executed, whatever the
+   server sends.
+2. A **pre-shared token**: `STREAM_CLI_SECRET` must match the token configured on the
+   device, which rejects anything else.
+
+The stream itself is **not encrypted** (no TLS yet) — the token authenticates, it does
+not conceal.
+
+### Commands that pause the stream
+
+A file-transfer command (e.g. a firmware or config download over the same modem) makes
+the device answer **twice**: it acks, **closes the socket**, runs the transfer, then
+**reconnects** and only *then* sends the buffered output. The server keeps the pending
+request alive across that disconnect — sessions are keyed by station id, not by
+connection — so the caller gets the real result rather than the ack. Use
+`STREAM_CLI_TRANSFER_TIMEOUT` (default 600 s).
+
+## Robustness
+
+A device streaming best-effort **drops bytes when its buffer is full**, so the stream
+*will* contain truncated frames and garbage runs. The framer **resyncs byte-by-byte**
+instead of desyncing; `resync_events` and `garbage_bytes` are exposed per station in the
+admin API.
+
+## Replay
+
+```bash
+python3 replay.py data/incoming_stream/1001/raw/ --out ./replayed
+```
+
+Feeds a recorded capture back through the **same** framer, router and sinks — so
+decoders can be tested and history reprocessed without any hardware. Output is
+byte-identical to the live run.
+
+## Testing without hardware
+
+`fake_device.py` emulates a device end to end — identification, GNSS frames, sensor
+frames, and the full CLI flow including the pause/reconnect transfer dance:
+
+```bash
+python3 streaming_server.py &
+python3 fake_device.py --secret <token> --duration 60
+curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
+```
+
+## Configuration (.env)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAM_HOST` | `0.0.0.0` | TCP bind address |
+| `STREAM_PORT` | `9000` | Device data port |
+| `STREAM_ADMIN_PORT` | `9001` | Admin/CLI HTTP port — **do not expose publicly** |
+| `STREAM_DIR` | `./data/incoming_stream` | Output root |
+| `STREAM_CLI_SECRET` | *(empty)* | Pre-shared CLI token — **must match the device** |
+| `STREAM_RAW_CAPTURE` | `true` | Record the raw byte stream |
+| `STREAM_RAW_MAX_AGE_H` | `168` | Prune raw captures after N hours (7 days) |
+| `STREAM_IDLE_TIMEOUT` | `180` | Drop a socket after N seconds of silence |
+| `STREAM_CLI_TIMEOUT` | `60` | Normal CLI command timeout |
+| `STREAM_CLI_TRANSFER_TIMEOUT` | `600` | Timeout for stream-pausing transfer commands |
+| `STREAM_PRE_IDENT_CAP` | `8192` | Bytes allowed before a connection must identify itself |
+
+`API_KEY` is shared with the batch server.
+
+## Implementation notes
+
+UBX and RTCM3 message definitions, parsing, checksum and CRC-24Q come from
+**`pyubx2` / `pyrtcm`** — none of that is hand-rolled. Only three things are ours, each
+for a stated reason:
+
+1. **The framer** (`streaming/framer.py`) — `pyubx2`'s `UBXReader` reads from a
+   *blocking* stream, but this server is asyncio; we also need byte-exact raw frames for
+   the recordings, and our own resync counters.
+2. **The private frame class** (`streaming/frames.py`) — the device's own protocol,
+   carried inside a UBX envelope (private class `0xF0`) so it rides the same sync-byte
+   scan and is checksum-protected.
+3. **The GPS→calendar conversion** (`streaming/gpstime.py`) — it must mirror the
+   device's convention, so `pyubx2`'s UTC helpers would be *wrong* here.
+
+### Adapting to your own device
+
+| You want to… | Change |
+|---|---|
+| add a sensor type | a new id + a `SENSOR_SPECS` entry in `streaming/frames.py` |
+| change the time convention | `streaming/gpstime.py::gps_to_datetime()` |
+| change the file layout | `streaming/sinks.py` |
+| forward data somewhere (NTRIP caster, message bus, live fan-out) | add a `Sink` subclass — the framer and routing stay untouched |
+
+## Not implemented
+
+- **NTRIP caster** — RTCM3 is recorded but not forwarded.
+- **Live data fan-out.**
+- **TLS on the stream socket.**
+
+The sink abstraction exists so the first two can be added without touching the framer or
+the routing.
+
+---
+
 ## Project Structure
 
 ```
 wormhole/
-├── server.py                        # FastAPI server
+├── server.py                        # Batch: FastAPI file server
+├── streaming_server.py              # Streaming: entry point
+├── streaming/                       # Streaming: framer, frames, gpstime,
+│                                    #   sinks, pipeline, station, server, config
+├── replay.py                        # Streaming: replay a raw capture
+├── fake_device.py                   # Streaming: device emulator
+├── tests/                           # Streaming: pytest suite
+├── pytest.ini
 ├── requirements.txt                 # Python dependencies
-├── .env.example                     # Configuration template
+├── requirements-dev.txt             # + pytest
+├── .env.example                     # Configuration template (both servers)
 ├── generate-ssl.sh                  # SSL certificate generator
-├── wormhole.service                 # systemd service template
+├── wormhole.service                 # systemd service (batch)
+├── wormhole-streaming.service       # systemd service (streaming)
 ├── server-deployment.md             # Server setup guide
-├── test_upload.py                   # Upload test client
-├── test_download.py                 # Download test client
-├── test_chunk_upload.py             # In-process test for chunked-upload reassembly
+├── test_upload.py                   # Batch: upload test client
+├── test_download.py                 # Batch: download test client
+├── test_chunk_upload.py             # Batch: in-process test for chunked-upload reassembly
 └── data/
-    ├── incoming/                    # Received uploads
-    └── outgoing/                    # Files available for download
+    ├── incoming/                    # Batch: received uploads
+    ├── outgoing/                    # Batch: files available for download
+    └── incoming_stream/             # Streaming: per-station demuxed output
 ```
 
 ## License

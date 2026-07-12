@@ -3,3 +3,7 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
 aiofiles>=24.0.0
+
+# Streaming server: UBX / RTCM3 message definitions, parsing, checksum + CRC-24Q.
+# Pulls in pyrtcm and pynmeagps.
+pyubx2>=1.2.44
