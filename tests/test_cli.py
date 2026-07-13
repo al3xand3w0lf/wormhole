@@ -18,12 +18,16 @@ from streaming.station import StationSession, is_download_class
 class FakeWriter:
     def __init__(self):
         self.sent = bytearray()
+        self.closed = False
 
     def write(self, data: bytes) -> None:
         self.sent.extend(data)
 
     async def drain(self) -> None:
         pass
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def make_session() -> tuple[StationSession, FakeWriter]:
@@ -87,6 +91,38 @@ async def test_download_ack_does_not_resolve_the_request():
     # 4) ... and only now sends the deferred output.
     session.handle_cli_response(CliResponse("CONFIG.TXT downloaded\r\n", last=True))
     assert await task == "CONFIG.TXT downloaded\r\n"
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_cleanup_must_not_unbind_the_live_one():
+    """A re-dialling device opens the new socket before the old one is reaped.
+
+    The stale socket then hits its idle timeout *after* the new one is bound. Its
+    cleanup must not clear the live binding — that would report a happily streaming
+    station as disconnected and make the remote CLI unusable.
+    """
+    session, old_writer = make_session()
+
+    new_writer = FakeWriter()
+    session.bind(new_writer, "1.2.3.4:5001")          # device re-dials
+    assert old_writer.closed, "the superseded socket must be closed at once"
+
+    session.unbind(old_writer)                        # stale handler finally runs
+
+    assert session.connected is True
+    assert session.writer is new_writer
+    assert session.peer == "1.2.3.4:5001"
+
+    # And the CLI still works over the live connection.
+    task = asyncio.create_task(session.send_cli("sysinfo", "", timeout=5))
+    await asyncio.sleep(0)
+    assert new_writer.sent, "command must go out over the new socket"
+    session.handle_cli_response(CliResponse("ok\n", last=True))
+    assert await task == "ok\n"
+
+    # The live connection's own cleanup does unbind it.
+    session.unbind(new_writer)
+    assert session.connected is False
 
 
 @pytest.mark.asyncio

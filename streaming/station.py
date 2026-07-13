@@ -67,6 +67,18 @@ class StationSession:
         return self.writer is not None
 
     def bind(self, writer: asyncio.StreamWriter, peer: str) -> None:
+        # A device that re-dials (new IP) often opens the new socket *before* the
+        # old one is reaped, so the stale socket would linger until its idle
+        # timeout. Drop it now: only the newest connection may own the station.
+        old = self.writer
+        if old is not None and old is not writer:
+            logger.info("station %s superseded by %s - closing stale %s",
+                        self.station_id, peer, self.peer)
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001 - the stale socket may already be dead
+                pass
+
         self.writer = writer
         self.peer = peer
         self.connected_since = datetime.now(timezone.utc)
@@ -77,7 +89,19 @@ class StationSession:
             )
             self.transfer_in_progress = False
 
-    def unbind(self) -> None:
+    def unbind(self, writer: asyncio.StreamWriter | None = None) -> None:
+        """Release this connection's binding.
+
+        `writer` identifies the caller's connection. A stale connection (already
+        superseded by a newer one) must NOT clear the live binding — otherwise its
+        delayed cleanup marks a happily streaming station as disconnected and kills
+        the remote CLI. Pass None only where there is no competing connection (tests).
+        """
+        if writer is not None and self.writer is not writer:
+            logger.info("station %s: stale connection closed, live one kept",
+                        self.station_id)
+            return
+
         self.writer = None
         self.peer = None
         # A disconnect while a download-class command is outstanding is expected,

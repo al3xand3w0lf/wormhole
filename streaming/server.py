@@ -133,7 +133,7 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
         logger.exception("%s handler error", peer)
     finally:
         if session is not None:
-            session.unbind()
+            session.unbind(writer)
             logger.info("station %s disconnected (%s)", session.station_id, peer)
         else:
             logger.info("%s disconnected without IDENT", peer)
