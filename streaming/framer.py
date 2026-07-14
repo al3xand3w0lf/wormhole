@@ -1,9 +1,15 @@
 """Byte-stream framer.
 
 The device is a thin pipe: it tees the raw u-blox byte stream (UBX + RTCM3) and
-interleaves its own private frames (private UBX class 0xF0). It sends best-effort
-with drop-on-full, so the stream *will* contain truncated frames and gaps. The
-framer must resync rather than desync.
+interleaves its own private frames (private UBX class 0xF0). A device can damage that
+stream — by dropping bytes when a buffer fills, or by letting a second producer write
+between the chunks of a chunked send, which tears a large frame in two. The framer
+must resync rather than desync: one bad frame must cost one frame, never the rest of
+the session.
+
+`resync_events` / `garbage_bytes` make such damage *visible* instead of silently
+absorbing it. A healthy device holds them at **zero**, so any rise is a signal worth
+chasing — they are what exposed the torn-frame case above.
 
 Why our own framer instead of pyubx2's UBXReader:
   1. UBXReader reads from a *blocking* stream (`.read(n)`); this server is asyncio.

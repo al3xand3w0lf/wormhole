@@ -284,10 +284,17 @@ connection — so the caller gets the real result rather than the ack. Use
 
 ## Robustness
 
-A device streaming best-effort **drops bytes when its buffer is full**, so the stream
-*will* contain truncated frames and garbage runs. The framer **resyncs byte-by-byte**
-instead of desyncing; `resync_events` and `garbage_bytes` are exposed per station in the
-admin API.
+A device can damage the stream — dropping bytes when its buffer fills, or tearing a
+frame in two if a second producer writes between the chunks of a chunked send. The
+framer **resyncs byte-by-byte** instead of desyncing, so a single bad frame costs one
+frame and not the rest of the session. `resync_events` and `garbage_bytes` are exposed
+per station in the admin API.
+
+**With a healthy device both counters stay at 0.** Treat any sustained rise as a defect
+to investigate, not as background noise. A garbage byte does not mean data was *lost* —
+it means the framer could not *place* it, which is a different failure with a different
+fix. Keep a raw capture (`STREAM_RAW_CAPTURE=true`) so the difference can be told apart
+after the fact.
 
 ## Replay
 

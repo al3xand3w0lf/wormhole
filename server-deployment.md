@@ -296,6 +296,9 @@ curl -X POST http://localhost:9001/stream/1001/cli \
      -d '{"cmd": "sysinfo"}'
 ```
 
-`resync_events` / `garbage_bytes` staying at 0 means clean reception. Rising values mean
-packet loss, or the device's send buffer overflowing — the latter is by design
-(best-effort streaming), so only persistently high values are a warning sign.
+`resync_events` / `garbage_bytes` staying at 0 means clean reception — and **0 is the
+expected steady state**, not an ideal. A rising count means the stream is being damaged:
+bytes lost in transit, or the device tearing its own frames apart. **Do not write it off
+as best-effort noise** — that assumption once hid a firmware bug that was destroying
+3.5 % of all RAWX epochs. Investigate instead, and keep a raw capture
+(`STREAM_RAW_CAPTURE=true`) so the damage can be analysed after the fact.

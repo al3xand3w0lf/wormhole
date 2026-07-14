@@ -32,7 +32,7 @@ async def test_stream_is_demuxed_to_files(tmp_path, monkeypatch):
     sensor_msg = sensor(ID_SENSOR_INA219, "<Iiii", 1_783_000_000, 12345, -678, 9012)
 
     _, writer = await asyncio.open_connection("127.0.0.1", port)
-    # IDENT first, then a stream with a garbage run in the middle (drop-on-full).
+    # IDENT first, then a stream with a garbage run in the middle (a damaged stream).
     writer.write(ident(STATION) + ubx_msg + b"\x00\xff garbage \x11" + rtcm_msg + sensor_msg)
     await writer.drain()
     writer.close()

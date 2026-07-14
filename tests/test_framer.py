@@ -1,6 +1,7 @@
-"""The framer must survive a best-effort stream: the device drops bytes when its
-tee buffer is full, so truncated frames and garbage runs are normal, not
-exceptional. Desyncing on them would silently lose the rest of the session.
+"""The framer must survive a damaged stream: a device can drop bytes when its tee
+buffer fills, or tear a frame in two by writing something else between the chunks of
+a chunked send. Either way the framer has to resync, not desync — desyncing on a
+single bad frame would silently lose the rest of the session.
 """
 
 from pyubx2 import UBXReader
