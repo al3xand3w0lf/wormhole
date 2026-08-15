@@ -30,6 +30,8 @@ from fastapi.responses import JSONResponse, FileResponse
 import uvicorn
 from dotenv import load_dotenv
 
+from downloads import DOWNLOAD_DIR, sanitize_filename
+
 # load .env
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
@@ -37,7 +39,8 @@ load_dotenv(BASE_DIR / ".env")
 # --- Configuration (via .env or defaults) ---
 API_KEY = os.getenv("API_KEY", "changeme")
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "data" / "incoming"))
-DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", BASE_DIR / "data" / "outgoing"))
+# DOWNLOAD_DIR comes from downloads.py (same .env key) so the streaming server
+# serves from the identical directory.
 LOG_FILE = os.getenv("LOG_FILE", str(BASE_DIR / "server.log"))
 ACCESS_LOG_FILE = os.getenv("ACCESS_LOG_FILE", str(BASE_DIR / "server.access.log"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10 MB
@@ -142,15 +145,9 @@ async def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
     return api_key
 
 
-def _sanitize_filename(filename: str) -> str:
-    import re
-    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    sanitized = sanitized.replace('..', '_').strip()
-    if len(sanitized) > 255:
-        sanitized = Path(sanitized).stem[:200] + Path(sanitized).suffix
-    if not sanitized or sanitized in ('.', '..'):
-        sanitized = f"unknown_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    return sanitized
+# Shared with the streaming server so both hand out the same files under the
+# same names — see downloads.py.
+_sanitize_filename = sanitize_filename
 
 
 # --- Middleware ---

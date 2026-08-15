@@ -4,15 +4,23 @@ Keeping this in one place is what makes `replay.py` meaningful: a recorded raw
 stream is processed by exactly the same code path as a live connection.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
 from pyubx2 import UBXReader
 
+from . import config, filetransfer
 from .frames import (
     PRIVATE_CLASS,
     ID_IDENT,
+    FILE_PHASE_ABORTED,
+    FILE_PHASE_DONE,
     CliResponse,
+    FileRequest,
+    FileStatus,
+    FileUpBegin,
+    FileUpData,
     Heartbeat,
     Ident,
     SensorReading,
@@ -48,6 +56,17 @@ def rtcm3_message_type(raw: bytes) -> int:
 def ident_station_id(frame: Frame) -> int | None:
     msg = decode_private(frame.raw)
     return msg.station_id if isinstance(msg, Ident) else None
+
+
+def decode_ident(frame: Frame) -> Ident | None:
+    """The full IDENT, including its role byte - see frames.py's Ident.role.
+
+    Kept separate from ident_station_id() rather than replacing it: that
+    helper is the narrower, older contract (station id only) and this avoids
+    touching any caller that only ever needed that.
+    """
+    msg = decode_private(frame.raw)
+    return msg if isinstance(msg, Ident) else None
 
 
 def _update_clock(session: StationSession, raw: bytes) -> None:
@@ -123,6 +142,65 @@ def _route_private(session: StationSession, frame: Frame) -> None:
         session.handle_cli_response(msg)
         return
 
+    if isinstance(msg, FileRequest):
+        _start_file_transfer(session, msg)
+        return
+
+    if isinstance(msg, FileUpBegin):
+        _upload_receiver(session).begin(msg)
+        return
+
+    if isinstance(msg, FileUpData):
+        _upload_receiver(session).data(msg)
+        return
+
+    if isinstance(msg, FileStatus):
+        _log_file_status(session, msg)
+        return
+
     if isinstance(msg, (Heartbeat, Ident)):
         # IDENT is consumed by the connection handler; a repeat is harmless.
         return
+
+
+def _start_file_transfer(session: StationSession, req: FileRequest) -> None:
+    """Kick off the transfer as a background task.
+
+    Deliberately fire-and-forget on the event loop: route_frame() is synchronous
+    and is also driven by replay.py, which has no loop at all. A recorded stream
+    replayed offline therefore logs the request and moves on instead of trying to
+    serve a file to a device that is not there.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.info("station %s: FILE_REQUEST %r (offline replay - not served)",
+                    session.station_id, req.name)
+        return
+
+    # Keep a reference: a bare create_task() may be garbage-collected mid-flight.
+    session.file_transfer_task = loop.create_task(filetransfer.send_file(session, req.name))
+
+
+def _upload_receiver(session: StationSession) -> filetransfer.UploadReceiver:
+    """The station's upload reassembler, created on first use.
+
+    Lazy so that a station that never uploads never touches the filesystem, and
+    so replay.py can route these frames without a live connection.
+    """
+    if session.upload_receiver is None:
+        session.upload_receiver = filetransfer.UploadReceiver(
+            config.STREAM_DIR, session.station_id)
+    return session.upload_receiver
+
+
+def _log_file_status(session: StationSession, st: FileStatus) -> None:
+    if st.phase == FILE_PHASE_DONE:
+        logger.info("station %s: transfer complete, %d bytes", session.station_id, st.bytes_)
+    elif st.phase == FILE_PHASE_ABORTED:
+        logger.warning("station %s: transfer aborted after %d bytes (device code %d)",
+                       session.station_id, st.bytes_, st.code)
+        session.fail_pending_download(f"transfer aborted (device code {st.code})")
+    else:
+        logger.info("station %s: transfer accepted, %d bytes expected",
+                    session.station_id, st.bytes_)

@@ -196,7 +196,7 @@ station**. All protocol intelligence lives on the server.
 pip install -r requirements-dev.txt
 cp .env.example .env          # set API_KEY and STREAM_CLI_SECRET
 python3 streaming_server.py   # TCP :9000 (data) + HTTP :9001 (admin)
-pytest                        # 135 tests
+pytest                        # 209 tests
 ```
 
 ## What it does
@@ -245,6 +245,9 @@ and `tests/test_gpstime.py` pins it.
 |--------|------|-------------|
 | `GET` | `/health` | Health check (no auth) |
 | `GET` | `/stream/stations` | Connected stations: GNSS clock, frame counters, resyncs, RTCM3 type histogram |
+| `GET` | `/stream/rover` | Correction downlink counters + auto-discovery candidates |
+| `POST`/`DELETE` | `/stream/rover/subscribe` | Manually add/remove a rover on a base's router, live, no restart |
+| `POST` | `/stream/rover/reload` | Re-read `STREAM_ROVER_BASES` from `.env` and apply the diff live |
 | `POST` | `/stream/{station_id}/cli` | Send a CLI command, get the reassembled response |
 
 ```bash
@@ -281,6 +284,18 @@ the device answer **twice**: it acks, **closes the socket**, runs the transfer, 
 request alive across that disconnect — sessions are keyed by station id, not by
 connection — so the caller gets the real result rather than the ack. Use
 `STREAM_CLI_TRANSFER_TIMEOUT` (default 600 s).
+
+### RTK rover correction downlink
+
+A base already in the fleet (or an external NTRIP caster, via `STREAM_NTRIP_*`) can
+feed rovers RTCM3 corrections over the same TCP socket — no separate radio link.
+`STREAM_ROVER_BASES` pins specific base:rover pairs by hand; independently,
+`STREAM_ROVER_AUTO_ENABLE` (on by default) lets a station that identifies itself as
+a rover in its IDENT subscribe to its nearest trusted base automatically, live, no
+restart, no config edit — only base station ids listed in
+`STREAM_ROVER_AUTO_BASE_STATIONS` (or already a `STREAM_ROVER_BASES` key) are
+trusted as a correction source; a bare claim on the wire is not enough. See
+`streaming/rover.py` and `streaming/rover_discovery.py`.
 
 ## Robustness
 
@@ -332,6 +347,17 @@ curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
 | `STREAM_CLI_TIMEOUT` | `60` | Normal CLI command timeout |
 | `STREAM_CLI_TRANSFER_TIMEOUT` | `600` | Timeout for stream-pausing transfer commands |
 | `STREAM_PRE_IDENT_CAP` | `8192` | Bytes allowed before a connection must identify itself |
+| `STREAM_ROVER_BASES` | *(empty)* | In-fleet routing `base:rover[+rover...][,base:rover...]`; each base feeds its rovers in-process, no external caster. Empty turns in-fleet routing off |
+| `STREAM_ROVER_STATIONS` | *(empty)* | Station ids that receive RTCM3 corrections from the **external** NTRIP source below. Empty turns the external downlink off |
+| `STREAM_ROVER_QUEUE` | `24` | Per-rover queue depth in whole frames; the oldest is dropped on overflow |
+| `STREAM_ROVER_RTCM_TYPES` | *(empty)* | Allowlist of forwarded RTCM3 message types; empty forwards everything. For a link that cannot carry the full stream — see `streaming/rover.py` |
+| `STREAM_ROVER_AUTO_ENABLE` | `true` | Auto-subscribe role=rover stations to their nearest trusted base |
+| `STREAM_ROVER_AUTO_BASE_STATIONS` | *(empty)* | Station ids trusted as a correction source when they identify as role=base |
+| `STREAM_ROVER_MAX_BASELINE_KM` | `40` | Beyond this, a correction can't help — the rover is left unsubscribed |
+| `STREAM_ROVER_SWITCH_MARGIN_KM` | `5` | Hysteresis: a rover only switches base if the nearer one wins by more than this |
+| `STREAM_NTRIP_HOST` / `_PORT` | `rtk2go.com` / `2101` | Correction source caster |
+| `STREAM_NTRIP_MOUNT` | *(empty)* | Source mountpoint; empty means rovers are configured without a source yet |
+| `STREAM_NTRIP_USER` / `_PASS` | *(empty)* / `none` | Source caster credentials |
 
 `API_KEY` is shared with the batch server.
 
@@ -375,9 +401,11 @@ the routing.
 ```
 wormhole/
 ├── server.py                        # Batch: FastAPI file server
+├── downloads.py                     # Shared download dir, used by server.py + streaming/filetransfer.py
 ├── streaming_server.py              # Streaming: entry point
-├── streaming/                       # Streaming: framer, frames, gpstime,
-│                                    #   sinks, pipeline, station, server, config
+├── streaming/                       # Streaming: framer, frames, filetransfer, geo,
+│                                    #   gpstime, pipeline, rover, rover_discovery,
+│                                    #   sinks, station, server, config
 ├── replay.py                        # Streaming: replay a raw capture
 ├── fake_device.py                   # Streaming: device emulator
 ├── tests/                           # Streaming: pytest suite

@@ -6,19 +6,24 @@ server (server.py), which stays untouched.
 
 import asyncio
 import logging
+import signal
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 import uvicorn
+from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from . import config
+from .frames import ROLE_BASE, ROLE_ROVER
 from .framer import StreamFramer
-from .pipeline import ident_station_id, is_ident, route_frame
+from .pipeline import decode_ident, is_ident, route_frame
+from .rover import RoverRouter, RoverSourceSink, ntrip_source
+from .rover_discovery import BaseArpSink, RoverAutoDiscovery, RoverPositionSink
 from .sinks import FileSink
 from .station import StationRegistry, is_download_class
 
@@ -61,10 +66,75 @@ def sweep_stale_raw() -> None:
 
 
 def _make_sinks(station_id: int) -> list:
-    return [FileSink(config.STREAM_DIR, station_id, raw_capture=config.STREAM_RAW_CAPTURE)]
+    sinks = [FileSink(config.STREAM_DIR, station_id, raw_capture=config.STREAM_RAW_CAPTURE)]
+    # A base (statically configured in STREAM_ROVER_BASES, or auto-registered
+    # via _ensure_base_router() the moment it identifies with role=base) feeds
+    # its own rovers in-process: every RTCM3 frame it sends is published
+    # straight into that base's router. Additive - the base keeps its archive.
+    # BaseArpSink (a RoverSourceSink superset) when auto-discovery is on, so
+    # this base's ARP becomes a candidate for ANY role=rover station's
+    # nearest-base pick, not just its own static rover list.
+    if station_id in _base_routers:
+        if _discovery is not None:
+            sinks.append(BaseArpSink(_base_routers[station_id], station_id, _discovery))
+        else:
+            sinks.append(RoverSourceSink(_base_routers[station_id]))
+    # A station that identified as role=rover (frames.ROLE_ROVER) gets its own
+    # UBX-NAV-PVT fed to RoverAutoDiscovery, so it can be subscribed to its
+    # nearest base with no config at all. _station_roles is populated in
+    # handle_connection() from this station's very first IDENT, before this
+    # function is ever called for it (sinks are built once, on first
+    # get_or_create()) - see the ordering note there.
+    if _discovery is not None and _station_roles.get(station_id) == ROLE_ROVER:
+        sinks.append(RoverPositionSink(station_id, _discovery))
+    return sinks
 
 
 registry = StationRegistry(_make_sinks)
+
+# Created in run() when rovers are configured; None means the external-NTRIP
+# downlink is off.
+_rover_router: RoverRouter | None = None
+
+# station id -> role declared in its most recent IDENT. Populated in
+# handle_connection() BEFORE registry.get_or_create() (which only calls
+# _make_sinks() on a station's first-ever identification this process), so
+# _make_sinks() above can see the role the very first time it runs.
+_station_roles: dict[int, int] = {}
+
+# None unless STREAM_ROVER_AUTO_ENABLE - see rover_discovery.py.
+_discovery: RoverAutoDiscovery | None = None
+
+# The live, hot-reloadable copy of STREAM_ROVER_BASES (base -> manually pinned
+# rovers). Starts as config.STREAM_ROVER_BASES; POST /stream/rover/reload or
+# SIGHUP replace it via _apply_rover_bases(), which diffs old vs new and
+# leaves anything RoverAutoDiscovery is managing untouched.
+_manual_bases: dict[int, set[int]] = {}
+
+# In-fleet routing: base station id -> its RoverRouter. Populated in run() before
+# the server starts listening, so _make_sinks() can attach a RoverSourceSink to a
+# base the moment it connects. Empty means no in-fleet routing is configured.
+_base_routers: dict[int, "RoverRouter"] = {}
+
+
+def _ensure_base_router(station_id: int) -> None:
+    """Create a RoverRouter for `station_id` the moment it identifies as a base.
+
+    Only for station ids explicitly trusted as a correction source
+    (STREAM_ROVER_AUTO_BASE_STATIONS) - a bare role=base claim on the wire is
+    not enough, see rover_discovery.py's module docstring. A station already
+    statically configured in STREAM_ROVER_BASES already has a router from
+    run() and this is a no-op for it.
+    """
+    if station_id in _base_routers:
+        return
+    if station_id not in config.STREAM_ROVER_AUTO_BASE_STATIONS:
+        return
+    router = RoverRouter(registry, set(), config.STREAM_ROVER_QUEUE,
+                         config.STREAM_ROVER_RTCM_TYPES, base_station_id=station_id)
+    _base_routers[station_id] = router
+    asyncio.ensure_future(router.run())
+    logger.info("rover downlink: auto-registered base %d (role=base, trusted)", station_id)
 
 
 # ==========================================================================
@@ -101,12 +171,25 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
                 if session is None:
                     if not is_ident(frame):
                         continue  # cannot attribute anything before IDENT
-                    station_id = ident_station_id(frame)
-                    if station_id is None:
+                    ident = decode_ident(frame)
+                    if ident is None:
                         continue
+                    station_id = ident.station_id
+
+                    # Both must happen before get_or_create(): _make_sinks()
+                    # (called on this station's first-ever identification this
+                    # process) reads _station_roles and _base_routers to decide
+                    # what to attach, and only gets one chance to do so.
+                    _station_roles[station_id] = ident.role
+                    if ident.role == ROLE_BASE:
+                        _ensure_base_router(station_id)
+
                     session = registry.get_or_create(station_id)
                     session.bind(writer, peer)
-                    logger.info("station %s identified from %s", station_id, peer)
+                    logger.info("station %s identified from %s (role=%d)",
+                                station_id, peer, ident.role)
+                    if _discovery is not None:
+                        _discovery.on_ident(station_id, ident.role)
 
                     # Flush everything received so far (including this chunk).
                     session.bytes_rx += len(pending_raw)
@@ -133,8 +216,15 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
         logger.exception("%s handler error", peer)
     finally:
         if session is not None:
+            # unbind() is a no-op if a newer connection already superseded
+            # this one (writer-scoped, see StationSession.unbind) - only tell
+            # discovery about a disconnect that actually took the station
+            # offline, not a stale handler winding down after being replaced.
+            was_live = session.writer is writer
             session.unbind(writer)
             logger.info("station %s disconnected (%s)", session.station_id, peer)
+            if was_live and _discovery is not None:
+                _discovery.on_disconnect(session.station_id)
         else:
             logger.info("%s disconnected without IDENT", peer)
         try:
@@ -157,7 +247,10 @@ async def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
 
 
 class CliRequest(BaseModel):
-    cmd: str = Field(..., min_length=1, max_length=200)
+    # Printable ASCII only — encode_cmd_request() puts the command on the wire as
+    # ascii. Rejecting here answers 422 instead of letting the encode fail deeper in
+    # and surface as a 500 for what is a caller error.
+    cmd: str = Field(..., min_length=1, max_length=200, pattern=r"^[\x20-\x7E]+$")
     timeout: float | None = Field(None, gt=0, le=3600)
 
 
@@ -177,6 +270,117 @@ async def health():
 @admin.get("/stream/stations", tags=["Stream"])
 async def list_stations(_: str = Depends(verify_api_key)):
     return {"stations": [s.status() for s in registry.all()]}
+
+
+@admin.get("/stream/rover", tags=["Stream"])
+async def rover_status(_: str = Depends(verify_api_key)):
+    """Correction downlink counters.
+
+    The pair worth watching is frames_in against frames_out: equal means every
+    correction reached a rover, a growing gap means they are being dropped, and
+    dropped_full vs dropped_offline says which - the queue overflowing (the
+    device or the link cannot keep up) or the station not being there.
+
+    One entry per router under "routers": "base_<id>" for an in-fleet base source,
+    "ntrip" for the external caster source. "auto_discovery" (present whenever
+    STREAM_ROVER_AUTO_ENABLE) lists every role=rover candidate seen so far and,
+    for each, which base it is subscribed to and the baseline distance that
+    chose it - so a wrong subscription shows up here instead of being inferred
+    from a bad fix. A candidate with subscribed_base=null and has_fix=false is
+    holding for its first 3D fix (see rover_discovery.py's module docstring).
+    """
+    routers = {f"base_{base_id}": r.status() for base_id, r in _base_routers.items()}
+    if _rover_router is not None:
+        routers["ntrip"] = _rover_router.status()
+    if not routers and _discovery is None:
+        return {"enabled": False}
+    result = {"enabled": True, "routers": routers}
+    if _discovery is not None:
+        result["auto_discovery"] = _discovery.status()
+    return result
+
+
+class RoverSubscribeRequest(BaseModel):
+    base: int
+    rover: int
+
+
+@admin.post("/stream/rover/subscribe", tags=["Stream"])
+async def rover_subscribe(req: RoverSubscribeRequest, _: str = Depends(verify_api_key)):
+    """Manually subscribe a rover to a base's router, live - no restart.
+
+    The base must already have a router (statically configured, or already
+    auto-registered via a role=base IDENT) - this endpoint only ever adds a
+    rover to an existing router, it never creates one, which is the same
+    trust boundary _ensure_base_router() enforces for role=base.
+    """
+    router = _base_routers.get(req.base)
+    if router is None:
+        raise HTTPException(404, f"base {req.base} has no router (not configured and "
+                                  f"not yet identified as a trusted base)")
+    added = router.add_rover(req.rover)
+    return {"ok": True, "base": req.base, "rover": req.rover, "added": added}
+
+
+@admin.delete("/stream/rover/subscribe", tags=["Stream"])
+async def rover_unsubscribe(req: RoverSubscribeRequest, _: str = Depends(verify_api_key)):
+    router = _base_routers.get(req.base)
+    if router is None:
+        raise HTTPException(404, f"base {req.base} has no router")
+    removed = router.remove_rover(req.rover)
+    return {"ok": True, "base": req.base, "rover": req.rover, "removed": removed}
+
+
+def _reload_rover_bases_from_env() -> dict[int, set[int]]:
+    """Re-read STREAM_ROVER_BASES straight from .env - never os.environ/config,
+    which are process-lifetime; this is the whole point of a hot reload."""
+    values = dotenv_values(config.BASE_DIR / ".env")
+    return config.parse_rover_bases(values.get("STREAM_ROVER_BASES", "") or "")
+
+
+def _apply_rover_bases(new_map: dict[int, set[int]]) -> None:
+    """Diff `new_map` against the live `_manual_bases` and add/remove only the
+    difference - existing connections and anything RoverAutoDiscovery
+    subscribed on top are untouched. Never creates or destroys a router: a
+    base with no router yet (not in STREAM_ROVER_BASES at process start, and
+    not auto-registered) is skipped with a warning, same as it always was.
+    """
+    global _manual_bases
+    all_bases = set(_manual_bases) | set(new_map)
+    for base_id in all_bases:
+        old_rovers = _manual_bases.get(base_id, set())
+        new_rovers = new_map.get(base_id, set())
+        router = _base_routers.get(base_id)
+        if router is None:
+            if new_rovers:
+                logger.warning("rover reload: base %d has no router - %s not applied",
+                               base_id, sorted(new_rovers))
+            continue
+        for rover_id in sorted(new_rovers - old_rovers):
+            router.add_rover(rover_id)
+            logger.info("rover reload: base %d + rover %d", base_id, rover_id)
+        for rover_id in sorted(old_rovers - new_rovers):
+            router.remove_rover(rover_id)
+            logger.info("rover reload: base %d - rover %d", base_id, rover_id)
+    _manual_bases = new_map
+    if _discovery is not None:
+        _discovery._manual_rovers = _compute_manual_rovers(new_map)
+
+
+def _compute_manual_rovers(bases_map: dict[int, set[int]]) -> set[int]:
+    manual = set(config.STREAM_ROVER_STATIONS)
+    for rovers in bases_map.values():
+        manual |= rovers
+    return manual
+
+
+@admin.post("/stream/rover/reload", tags=["Stream"])
+async def rover_reload(_: str = Depends(verify_api_key)):
+    """Re-read STREAM_ROVER_BASES from .env and apply the diff live. The
+    SIGHUP handler in run() calls the same _apply_rover_bases()."""
+    new_map = _reload_rover_bases_from_env()
+    _apply_rover_bases(new_map)
+    return {"ok": True, "bases": {str(k): sorted(v) for k, v in new_map.items()}}
 
 
 @admin.post("/stream/{station_id}/cli", tags=["Stream"])
@@ -210,9 +414,71 @@ async def send_cli(station_id: int, req: CliRequest, _: str = Depends(verify_api
 # Lifecycle
 # ==========================================================================
 async def run() -> None:
+    global _rover_router, _discovery, _manual_bases
+
     setup_logging()
     config.STREAM_DIR.mkdir(parents=True, exist_ok=True)
     sweep_stale_raw()
+
+    # --- RTK rover correction downlink (optional) --------------------------
+    # Off unless stations are named AND a source is configured. A half-configured
+    # downlink must not start: a router with no source would sit there reporting
+    # zero frames, which reads like a broken caster rather than like a setting
+    # nobody filled in.
+    extra_tasks = []
+    if config.STREAM_ROVER_STATIONS:
+        _rover_router = RoverRouter(registry, config.STREAM_ROVER_STATIONS,
+                                    config.STREAM_ROVER_QUEUE,
+                                    config.STREAM_ROVER_RTCM_TYPES)
+        extra_tasks.append(_rover_router.run())
+        if config.STREAM_ROVER_RTCM_TYPES:
+            logger.info("rover downlink: forwarding only RTCM3 types %s",
+                        sorted(config.STREAM_ROVER_RTCM_TYPES))
+        if config.STREAM_NTRIP_MOUNT and config.STREAM_NTRIP_USER:
+            extra_tasks.append(ntrip_source(
+                _rover_router,
+                config.STREAM_NTRIP_HOST, config.STREAM_NTRIP_PORT,
+                config.STREAM_NTRIP_MOUNT, config.STREAM_NTRIP_USER,
+                config.STREAM_NTRIP_PASS,
+            ))
+            logger.info("rover downlink: %s -> stations %s",
+                        config.STREAM_NTRIP_MOUNT, sorted(config.STREAM_ROVER_STATIONS))
+        else:
+            logger.warning(
+                "STREAM_ROVER_STATIONS is set but no NTRIP source is configured "
+                "(STREAM_NTRIP_MOUNT / STREAM_NTRIP_USER) - no corrections will flow")
+
+    # --- In-fleet base -> rover routing (optional) -------------------------
+    # One router per base. The source is a RoverSourceSink (or BaseArpSink, if
+    # auto-discovery is on) attached to the base's stream in _make_sinks(), so
+    # _base_routers must be populated before the server starts listening -
+    # it is, right here. No external caster involved.
+    _manual_bases = dict(config.STREAM_ROVER_BASES)
+    for base_id, rover_ids in config.STREAM_ROVER_BASES.items():
+        router = RoverRouter(registry, rover_ids, config.STREAM_ROVER_QUEUE,
+                             config.STREAM_ROVER_RTCM_TYPES, base_station_id=base_id)
+        _base_routers[base_id] = router
+        extra_tasks.append(router.run())
+        logger.info("rover downlink: in-fleet base %d -> stations %s",
+                    base_id, sorted(rover_ids))
+
+    # --- Automatic rover -> nearest-base subscription (optional) -----------
+    # Needs no source of its own: it only ever calls add_rover()/remove_rover() on routers
+    # that already exist (the ones just built above, plus any a role=base
+    # IDENT registers later via _ensure_base_router()). A station already
+    # hand-pinned above (or in STREAM_ROVER_STATIONS) is never touched by it.
+    if config.STREAM_ROVER_AUTO_ENABLE:
+        _discovery = RoverAutoDiscovery(
+            _base_routers, _compute_manual_rovers(_manual_bases),
+            config.STREAM_ROVER_MAX_BASELINE_KM, config.STREAM_ROVER_SWITCH_MARGIN_KM,
+        )
+        logger.info(
+            "rover auto-discovery: on (max baseline %.0f km, switch margin %.0f km, "
+            "trusted auto-base stations %s)",
+            config.STREAM_ROVER_MAX_BASELINE_KM, config.STREAM_ROVER_SWITCH_MARGIN_KM,
+            sorted(config.STREAM_ROVER_AUTO_BASE_STATIONS) or "(none - only statically "
+            "configured bases can be auto-subscribed to)",
+        )
 
     tcp = await asyncio.start_server(handle_connection, config.STREAM_HOST, config.STREAM_PORT)
     logger.info("TCP data plane on %s:%d", config.STREAM_HOST, config.STREAM_PORT)
@@ -222,16 +488,28 @@ async def run() -> None:
     uv = uvicorn.Server(
         uvicorn.Config(
             admin,
-            host=config.STREAM_HOST,
+            host=config.STREAM_ADMIN_HOST,
             port=config.STREAM_ADMIN_PORT,
             log_level="warning",
             access_log=False,
         )
     )
-    logger.info("admin API on %s:%d", config.STREAM_HOST, config.STREAM_ADMIN_PORT)
+    logger.info("admin API on %s:%d", config.STREAM_ADMIN_HOST, config.STREAM_ADMIN_PORT)
+
+    def _on_sighup() -> None:
+        logger.info("SIGHUP received - reloading STREAM_ROVER_BASES from .env")
+        try:
+            _apply_rover_bases(_reload_rover_bases_from_env())
+        except Exception:  # noqa: BLE001 - a bad reload must not kill the server
+            logger.exception("rover reload via SIGHUP failed")
+
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, _on_sighup)
+    except (NotImplementedError, AttributeError):
+        logger.debug("SIGHUP reload unavailable on this platform - use POST /stream/rover/reload")
 
     try:
         async with tcp:
-            await asyncio.gather(tcp.serve_forever(), uv.serve())
+            await asyncio.gather(tcp.serve_forever(), uv.serve(), *extra_tasks)
     finally:
         registry.close_all()

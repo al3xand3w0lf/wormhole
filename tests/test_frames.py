@@ -8,16 +8,23 @@ from pyubx2 import isvalid_checksum
 from streaming.frames import (
     PRIVATE_CLASS,
     ID_CMD_REQUEST,
+    ID_IDENT,
     ID_SENSOR_ADXL345,
     ID_SENSOR_ADXL345_EXT,
     ID_SENSOR_INA219,
     ID_SENSOR_INA219_EXT,
     ID_SENSOR_LPS28DFW,
     ID_SENSOR_SHT4X,
+    ROLE_BASE,
+    ROLE_LOGGER,
+    ROLE_ROVER,
+    ROLE_STREAM,
+    ROLE_UNSET,
     CliResponse,
     Heartbeat,
     Ident,
     SensorReading,
+    build_ubx,
     decode_private,
     encode_cmd_request,
     ubx_payload,
@@ -29,6 +36,27 @@ from .helpers import cli_response, heartbeat, ident, sensor
 def test_ident():
     msg = decode_private(ident(1001))
     assert msg == Ident(1001)
+    assert msg.role == ROLE_UNSET
+
+
+@pytest.mark.parametrize("role", [ROLE_UNSET, ROLE_BASE, ROLE_ROVER, ROLE_LOGGER, ROLE_STREAM])
+def test_ident_role_byte(role):
+    """The role byte a firmware that supports auto-discovery sends - see the
+    module docstring for how each of these gets chosen on the device side."""
+    msg = decode_private(ident(1001, role))
+    assert msg == Ident(1001, role)
+
+
+def test_ident_without_a_role_byte_is_old_firmware_not_malformed():
+    """Every firmware before this feature sends stationId + 4 zero
+    reserved bytes and nothing else - payload length 8, no byte 4 to read in
+    the new sense (byte 4 IS there, it is just always 0 from the old
+    firmware's perspective). A genuinely SHORTER payload (< 5 bytes, so no
+    byte 4 at all) must still decode, falling back to ROLE_UNSET rather than
+    being rejected as malformed."""
+    raw = build_ubx(PRIVATE_CLASS, ID_IDENT, struct.pack("<I", 1001))  # 4 bytes only
+    msg = decode_private(raw)
+    assert msg == Ident(1001, ROLE_UNSET)
 
 
 def test_heartbeat():

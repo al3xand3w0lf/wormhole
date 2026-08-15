@@ -67,6 +67,18 @@ class StreamFramer:
         self.ubx_frames = 0
         self.rtcm3_frames = 0
 
+    def take_pending(self) -> bytes:
+        """Hand back (and clear) the bytes not yet consumed into a frame.
+
+        For switching a connection from framed to RAW mode: after FILE_BEGIN the
+        rest of the stream is unframed file payload, and anything buffered here is
+        its first bytes. Used by the device side (firmware and fake_device.py);
+        the server itself never receives raw payload.
+        """
+        pending = bytes(self._buf)
+        self._buf.clear()
+        return pending
+
     def feed(self, data: bytes) -> Iterator[Frame]:
         """Feed received bytes; yields every complete, checksum-valid frame."""
         self._buf.extend(data)

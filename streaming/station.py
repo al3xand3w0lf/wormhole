@@ -42,7 +42,16 @@ class StationSession:
         self.peer: str | None = None
         self.connected_since: datetime | None = None
         self.last_frame_at: datetime | None = None
+        # Legacy path (streaming_file_transfer = 0): the device closes the socket
+        # for an HTTP/FTP transfer and reconnects to answer.
         self.transfer_in_progress = False
+        # Current path: the transfer rides this socket, so it has a name and a
+        # task instead of a disconnect.
+        self.file_transfer_active = False
+        self.file_transfer_name: str | None = None
+        self.file_transfer_task = None
+        # Reassembles an incoming "upload <file>" (Stage 2); created on first use.
+        self.upload_receiver = None
 
         self.bytes_rx = 0
         self.ubx_frames = 0
@@ -53,6 +62,13 @@ class StationSession:
         # RTCM3 message-number histogram — shows at a glance whether the base is
         # actually emitting 1005 + MSM7 + 1230.
         self.rtcm3_types: dict[int, int] = {}
+
+        # Serialises everything written INTO the socket. A file transfer writes
+        # raw, unframed bytes that the device consumes by byte count, so a
+        # CMD_REQUEST frame slipped in between two payload writes would land
+        # inside the file — the same kind of splice that can tear a multi-chunk
+        # frame on the uplink, in the other direction.
+        self.write_lock = asyncio.Lock()
 
         self._cli_lock = asyncio.Lock()
         self._cli_future: asyncio.Future | None = None
@@ -104,6 +120,9 @@ class StationSession:
 
         self.writer = None
         self.peer = None
+        # An upload in flight cannot survive the socket it was riding on.
+        if self.upload_receiver is not None:
+            self.upload_receiver.abort("connection closed")
         # A disconnect while a download-class command is outstanding is expected,
         # not an error: the device is transferring and will come back.
         if self._cli_awaiting_deferred and not self._done():
@@ -136,6 +155,12 @@ class StationSession:
             if self.writer is None:
                 raise ConnectionError("station not connected")
 
+            # Encode first: the frame is ASCII-only, and a command that cannot be
+            # encoded has to fail before the future exists. Raising past a created
+            # future skips the finally below, leaving _done() False and cli_pending
+            # stuck at true for the rest of the session.
+            frame = encode_cmd_request(cmd, token)
+
             loop = asyncio.get_running_loop()
             self._cli_future = loop.create_future()
             self._cli_chunks = []
@@ -143,8 +168,27 @@ class StationSession:
             self._cli_acked = False
 
             self._log_cli(f"->\t{cmd}")
-            self.writer.write(encode_cmd_request(cmd, token))
-            await self.writer.drain()
+            # Waits out a running file transfer rather than splicing into it.
+            try:
+                async with self.write_lock:
+                    # Re-read the writer under the lock: the check above is not
+                    # enough. Waiting for write_lock can take arbitrarily long -
+                    # a file transfer owns it for its whole duration, and since
+                    # rover.py a correction stream contends for it several times
+                    # a second - and unbind() clears the writer to None in that
+                    # window when the device drops. Live 2026-08-06: a whoami
+                    # against station 1001 hit exactly this and returned a 500.
+                    writer = self.writer
+                    if writer is None:
+                        raise ConnectionError("station disconnected before the command was sent")
+                    writer.write(frame)
+                    await writer.drain()
+            except BaseException:
+                # Raising past a created future would leave _done() False and
+                # cli_pending stuck true for the rest of the session - the same
+                # hazard the encode above is ordered to avoid.
+                self._cli_future = None
+                raise
 
             try:
                 return await asyncio.wait_for(self._cli_future, timeout)
@@ -181,6 +225,19 @@ class StationSession:
         if not self._cli_future.done():
             self._cli_future.set_result(text)
 
+    def fail_pending_download(self, message: str) -> None:
+        """Resolve a pending download-class CLI request early.
+
+        For a transfer failure the server already knows the outcome (it answered
+        FILE_BEGIN itself, or saw FILE_STATUS(ABORTED)) and has no reason to wait
+        out the full timeout for a CLI_RESPONSE that a failed transfer may never
+        produce.
+        """
+        if self._cli_awaiting_deferred and not self._done():
+            self._log_cli(f"<-\t{message} (server-detected, no device response)")
+            if not self._cli_future.done():
+                self._cli_future.set_result(message)
+
     def _log_cli(self, line: str) -> None:
         stamp, sysclk = self.stamp()
         for sink in self.sinks:
@@ -201,6 +258,7 @@ class StationSession:
             "connected_since": self.connected_since.isoformat() if self.connected_since else None,
             "last_frame_at": self.last_frame_at.isoformat() if self.last_frame_at else None,
             "transfer_in_progress": self.transfer_in_progress,
+            "file_transfer": self.file_transfer_name if self.file_transfer_active else None,
             "gps_time": gps.isoformat() if gps else None,
             "leap_s": self.clock.leap_s,
             "bytes_rx": self.bytes_rx,

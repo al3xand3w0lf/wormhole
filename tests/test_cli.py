@@ -157,6 +157,30 @@ async def test_late_response_after_timeout_is_ignored():
 
 
 @pytest.mark.asyncio
+async def test_unencodable_command_does_not_strand_the_pending_future():
+    """A command the frame cannot carry must not wedge the session.
+
+    encode_cmd_request() is ascii-only. Encoding after the future was created meant
+    the raise skipped the cleanup: _done() stayed False and status() reported
+    cli_pending forever — one emoji from a chat client poisoned the station's
+    reported state until some later command happened to overwrite the future.
+    """
+    session, writer = make_session()
+
+    with pytest.raises(UnicodeEncodeError):
+        await session.send_cli("sysinfo ☃", "", timeout=5)
+
+    assert session.status()["cli_pending"] is False
+    assert not writer.sent, "a command that cannot be encoded must not go out"
+
+    # The lock is released and the session still works.
+    task = asyncio.create_task(session.send_cli("sysinfo", "", timeout=5))
+    await asyncio.sleep(0)
+    session.handle_cli_response(CliResponse("ok\n", last=True))
+    assert await task == "ok\n"
+
+
+@pytest.mark.asyncio
 async def test_commands_are_serialised_per_station():
     session, _ = make_session()
     first = asyncio.create_task(session.send_cli("sysinfo", "", timeout=5))
