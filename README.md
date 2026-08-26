@@ -265,6 +265,23 @@ confirm an RTK base is really emitting `1005` + MSM7 + `1230`:
 "rtcm3_types": {"1005": 42, "1077": 42, "1230": 42}
 ```
 
+### Interactive terminal
+
+`stream_cli/stream_cli.py` is a REPL and one-shot client for the endpoint above —
+Python standard library only, and no configuration on the server host: it reads
+`API_KEY` and the admin port out of the repo `.env` itself.
+
+```bash
+python stream_cli/stream_cli.py --list             # connected stations
+python stream_cli/stream_cli.py --station 1001     # REPL: type sysinfo, whoami, ...
+python stream_cli/stream_cli.py --station 1001 sysinfo   # one-shot
+```
+
+It holds no frame logic and never talks to a device directly — the server owns the
+secret, the response reassembly and the disconnect/reconnect transfer dance. Because
+the admin port binds loopback, reaching it from another machine means an SSH tunnel.
+Full reference, including the device allowlist: `stream_cli/stream_cli_commands.md`.
+
 ### CLI security
 
 Two independent layers:
@@ -429,6 +446,7 @@ wormhole/
 ├── fake_device.py                   # Streaming: device emulator
 ├── caster/                          # Bundled NTRIP caster (Millipede): setup.sh, generate_config.py
 ├── tools/                           # ntrip_relay.py — relay a mountpoint into one or more casters
+├── stream_cli/                      # Interactive terminal over the admin API (stdlib only)
 ├── tests/                           # Streaming: pytest suite
 ├── pytest.ini
 ├── requirements.txt                 # Python dependencies
