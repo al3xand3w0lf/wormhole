@@ -21,6 +21,10 @@ data/incoming_stream/*
 # Logs
 *.log
 
+# Bundled NTRIP caster: build output + generated config (mountpoint passwords,
+# derived from .env) - see caster/README.md. Never the setup tooling itself.
+caster/millipede-caster/
+
 # IDE
 .vscode/
 .idea/

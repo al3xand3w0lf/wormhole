@@ -38,6 +38,15 @@ THE POLICY, IN ONE PLACE
   (STREAM_ROVER_MAX_BASELINE_KM) beyond which a correction cannot help, and a
   switch margin (STREAM_ROVER_SWITCH_MARGIN_KM) so a rover sitting near the
   boundary between two bases does not flap between them every fix.
+- **A role is matched by exact value, never by exclusion.** ROLE_ROVER_NTRIP
+  (a rover that pulls its own corrections off an NTRIP caster and discards
+  anything we push it) must never be subscribed, and neither must any role
+  added on the device side after this was written. Testing `!= ROLE_BASE` or
+  "anything rover-ish" would have auto-subscribed the NTRIP rover on the day
+  its firmware shipped, occupied a slot, and had status() report a
+  subscription that does nothing. It is listed in status() with that reason
+  rather than omitted, because "absent" and "deliberately skipped" look the
+  same to whoever is wondering where their rover went.
 - **Disconnect clears state.** Position and subscription are dropped, not
   cached, on disconnect - a stale position is exactly what "hold" exists to
   avoid, and the device reconnects with a fresh IDENT in seconds regardless
@@ -48,7 +57,7 @@ THE POLICY, IN ONE PLACE
 import logging
 
 from . import geo
-from .frames import ROLE_ROVER
+from .frames import ROLE_ROVER, ROLE_ROVER_NTRIP
 from .sinks import Sink
 
 try:
@@ -167,7 +176,15 @@ class RoverAutoDiscovery:
     # -- inputs ---------------------------------------------------------
 
     def on_ident(self, station_id: int, role: int) -> None:
+        known = self.roles.get(station_id)
         self.roles[station_id] = role
+        if role == ROLE_ROVER_NTRIP and known != role:
+            # Said once per (re)connect, not per frame. Without it the only
+            # trace of this decision is an absence, and an absence explains
+            # nothing to someone asking why their rover is not subscribed.
+            logger.info("rover auto-discovery: station %d declared rover_ntrip - "
+                        "not a subscription candidate, it brings its own corrections",
+                        station_id)
         if role == ROLE_ROVER and station_id not in self._manual_rovers:
             # A reconnect with an already-known position (rare - see the
             # module docstring on why disconnect clears it) can subscribe
@@ -271,6 +288,18 @@ class RoverAutoDiscovery:
         """Per-rover candidate state: which base (if any), and why."""
         out = {}
         for rover_id, role in self.roles.items():
+            if role == ROLE_ROVER_NTRIP:
+                # Listed, not skipped. This station is a rover by every outward
+                # sign, so leaving it out of the rover status makes a deliberate
+                # policy look like a bug - and the honest answer would then exist
+                # nowhere in the running system.
+                out[str(rover_id)] = {
+                    "subscribed_base": None,
+                    "distance_m": None,
+                    "has_fix": rover_id in self.rover_positions,
+                    "not_a_candidate": "brings its own corrections (NTRIP)",
+                }
+                continue
             if role != ROLE_ROVER or rover_id in self._manual_rovers:
                 continue
             base_id = self.rover_subscribed.get(rover_id)

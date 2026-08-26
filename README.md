@@ -196,7 +196,7 @@ station**. All protocol intelligence lives on the server.
 pip install -r requirements-dev.txt
 cp .env.example .env          # set API_KEY and STREAM_CLI_SECRET
 python3 streaming_server.py   # TCP :9000 (data) + HTTP :9001 (admin)
-pytest                        # 209 tests
+pytest                        # 238 tests
 ```
 
 ## What it does
@@ -358,6 +358,11 @@ curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
 | `STREAM_NTRIP_HOST` / `_PORT` | `rtk2go.com` / `2101` | Correction source caster |
 | `STREAM_NTRIP_MOUNT` | *(empty)* | Source mountpoint; empty means rovers are configured without a source yet |
 | `STREAM_NTRIP_USER` / `_PASS` | *(empty)* / `none` | Source caster credentials |
+| `STREAM_CASTER_ENABLE` | `false` | Push demuxed RTCM3 out to an NTRIP caster (the reverse direction from `STREAM_NTRIP_*` above) |
+| `STREAM_CASTER_HOST` / `_PORT` | `127.0.0.1` / `2101` | Target caster — defaults to the one bundled in `caster/` |
+| `STREAM_CASTER_PASSWORDS` | *(empty)* | `station:password[,station:password...]` — a station missing here gets no caster push |
+| `STREAM_CASTER_STATIONS` | *(empty)* | Read only by `caster/generate_config.py`, not the server — stations to provision a mountpoint for |
+| `STREAM_CASTER_TARGETS` | *(empty)* | Further casters to push the same stations to, by name — each configured by `STREAM_CASTER_<NAME>_{HOST,PORT,PASSWORDS,ENABLE}`. Additive to the bundled caster above |
 
 `API_KEY` is shared with the batch server.
 
@@ -385,13 +390,27 @@ for a stated reason:
 | change the file layout | `streaming/sinks.py` |
 | forward data somewhere (NTRIP caster, message bus, live fan-out) | add a `Sink` subclass — the framer and routing stay untouched |
 
+## NTRIP caster
+
+Two independent, additive pieces (the archive sink keeps recording everything either
+way): `streaming/ntrip.py`'s `NtripCasterSink` pushes a station's demuxed RTCM3 live
+to any NTRIP caster's mountpoint (`STREAM_CASTER_*` above), and `caster/` bundles an
+actual caster (Millipede) with this repo so there's somewhere to push to out of the
+box — `caster/setup.sh` builds it and provisions one mountpoint per configured
+station. See `caster/README.md`. A rover can then get corrections either directly
+over the streaming TCP socket, or indirectly by pulling from this caster as a
+standard NTRIP client.
+
+`tools/ntrip_relay.py` relays an existing NTRIP mountpoint into one or more casters,
+which is how you exercise a fresh caster with a real correction stream before you have
+a station of your own pushing into it.
+
 ## Not implemented
 
-- **NTRIP caster** — RTCM3 is recorded but not forwarded.
 - **Live data fan-out.**
 - **TLS on the stream socket.**
 
-The sink abstraction exists so the first two can be added without touching the framer or
+The sink abstraction exists so it can be added without touching the framer or
 the routing.
 
 ---
@@ -408,6 +427,8 @@ wormhole/
 │                                    #   sinks, station, server, config
 ├── replay.py                        # Streaming: replay a raw capture
 ├── fake_device.py                   # Streaming: device emulator
+├── caster/                          # Bundled NTRIP caster (Millipede): setup.sh, generate_config.py
+├── tools/                           # ntrip_relay.py — relay a mountpoint into one or more casters
 ├── tests/                           # Streaming: pytest suite
 ├── pytest.ini
 ├── requirements.txt                 # Python dependencies

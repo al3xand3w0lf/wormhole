@@ -16,7 +16,8 @@ Wire format (little-endian, packed):
     0x01  SENSOR_INA219        dev->srv   <Iiii  rtc_unix, mV, mA, mW        (internal)
     0x02  SENSOR_ADXL345       dev->srv   <Iiii  rtc_unix, x_ug, y_ug, z_ug  (internal)
     0x03  IDENT                dev->srv   <IB3x  stationId, role (0=unset 1=base 2=rover
-                                                  3=logger 4=stream) + 3 reserved
+                                                  3=logger 4=stream 5=rover_ntrip)
+                                                  + 3 reserved
     0x04  HEARTBEAT            dev->srv   (empty)
     0x05  CLI_RESPONSE         dev->srv   [more_flag u8][text]  0=more, 1=last
     0x06  CMD_REQUEST          srv->dev   [tok_len u8][token][cmd]
@@ -47,6 +48,19 @@ its own. A missing/zero byte (old firmware, or a payload too short to carry
 it) decodes as ROLE_UNSET, never as ROLE_BASE — an auto-created correction
 source requires an explicit ROLE_BASE, not silence.
 
+⚠️ ROLE_ROVER_NTRIP is a rover that fetches its corrections from an NTRIP
+caster itself and DISCARDS anything we push it. It is deliberately not
+ROLE_ROVER: given that value it would pass every candidacy test in
+rover_discovery.py, occupy a subscription slot, and make /stream/rover report a
+subscription that does nothing. Two things that must be treated differently
+need different bytes, even when they are the same kind of station.
+
+**Never test a role by exclusion.** Everything here matches an exact value, so
+a role added on the device side is a non-candidate until someone decides
+otherwise — which is the only reason ROLE_ROVER_NTRIP was handled correctly on
+the day the firmware shipped it. `!= ROLE_BASE` or "anything rover-ish" would
+have auto-subscribed it.
+
 File transfer: after FILE_BEGIN the server writes exactly `total` RAW bytes
 into the socket — no envelope, no per-chunk header. The device does not need
 one if its own modem read call is itself length-prefixed, so the byte count
@@ -72,6 +86,7 @@ ROLE_BASE = 1
 ROLE_ROVER = 2
 ROLE_LOGGER = 3
 ROLE_STREAM = 4
+ROLE_ROVER_NTRIP = 5
 
 ID_SENSOR_INA219 = 0x01
 ID_SENSOR_ADXL345 = 0x02

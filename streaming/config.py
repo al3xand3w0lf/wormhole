@@ -5,6 +5,7 @@ so the admin API uses the same X-API-Key as the batch server.
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -122,6 +123,95 @@ STREAM_NTRIP_PORT = int(os.getenv("STREAM_NTRIP_PORT", "2101"))
 STREAM_NTRIP_MOUNT = os.getenv("STREAM_NTRIP_MOUNT", "")
 STREAM_NTRIP_USER = os.getenv("STREAM_NTRIP_USER", "")
 STREAM_NTRIP_PASS = os.getenv("STREAM_NTRIP_PASS", "none")
+
+# ---- Bundled NTRIP caster push (streaming/ntrip.py, caster/) --------------
+# Forwards a station's demuxed RTCM3 live to an NTRIP caster mountpoint (one
+# mountpoint per station, mountpoint name == station id) via NtripCasterSink.
+# Distinct from STREAM_NTRIP_* above, which is the opposite direction (this
+# server *pulling* corrections for a rover from an external caster).
+#
+# Defaults point at the caster bundled in caster/ (127.0.0.1, Millipede's
+# default port) - see caster/README.md to build and provision it. Any NTRIP
+# caster speaking the NTRIP 1.0 SOURCE handshake works here, bundled or not;
+# only the host/port need to change to push elsewhere instead.
+#
+# A station missing from STREAM_CASTER_PASSWORDS is simply not forwarded -
+# its mountpoint may not be provisioned. Empty (the default) turns this off
+# entirely: no caster connection, no task, nothing to go wrong on a server
+# that runs no caster.
+STREAM_CASTER_ENABLE = _bool("STREAM_CASTER_ENABLE", False)
+STREAM_CASTER_HOST = os.getenv("STREAM_CASTER_HOST", "127.0.0.1")
+STREAM_CASTER_PORT = int(os.getenv("STREAM_CASTER_PORT", "2101"))
+
+
+def _station_passwords(value: str) -> dict[int, str]:
+    """Parse "1001:pw1,1002:pw2" into {1001: "pw1", 1002: "pw2"}."""
+    result: dict[int, str] = {}
+    for pair in value.replace(";", ",").split(","):
+        station, _, password = pair.partition(":")
+        station, password = station.strip(), password.strip()
+        if station.isdigit() and password:
+            result[int(station)] = password
+    return result
+
+
+STREAM_CASTER_PASSWORDS = _station_passwords(os.getenv("STREAM_CASTER_PASSWORDS", ""))
+
+
+# ---- Additional NTRIP caster targets --------------------------------------
+# The keys above configure one caster - the bundled one, whose credentials
+# caster/setup.sh writes there itself. A deployment that pushes the same
+# stations to *further* casters (a public one, a partner's, a second instance
+# for evaluation) names them in STREAM_CASTER_TARGETS and gets one
+# NtripCasterSink per target per station, all additive:
+#
+#   STREAM_CASTER_TARGETS=partner,bkg
+#   STREAM_CASTER_PARTNER_HOST=ntrip.example.org
+#   STREAM_CASTER_PARTNER_PORT=2101
+#   STREAM_CASTER_PARTNER_PASSWORDS=1001:pw
+#   STREAM_CASTER_BKG_PORT=2104
+#   STREAM_CASTER_BKG_PASSWORDS=1001:shared,1002:shared
+#
+# The name is free-form; it only builds the key prefix (upper-cased, "-" -> "_")
+# and labels the target in the log. Listing a name *is* the enable - a target
+# is switched off by removing it from the list, or, to keep its settings around,
+# by STREAM_CASTER_<NAME>_ENABLE=false.
+#
+# Per target, a station missing from that target's _PASSWORDS is not forwarded
+# there: mountpoints are provisioned per caster, and a station may exist on one
+# and not the next. Some casters (BKG's NTRIP 1.0 source auth, for one) use a
+# single global password for every mountpoint - then every station in that
+# target's list simply repeats the same value.
+
+
+@dataclass(frozen=True)
+class CasterTarget:
+    """One additional caster to push to, from STREAM_CASTER_<NAME>_* keys."""
+
+    name: str
+    host: str
+    port: int
+    passwords: dict[int, str]
+
+
+def _caster_targets(value: str) -> tuple[CasterTarget, ...]:
+    targets = []
+    for name in (n.strip() for n in value.replace(";", ",").split(",")):
+        if not name:
+            continue
+        key = name.upper().replace("-", "_")
+        if not _bool(f"STREAM_CASTER_{key}_ENABLE", True):
+            continue
+        targets.append(CasterTarget(
+            name=name,
+            host=os.getenv(f"STREAM_CASTER_{key}_HOST", "127.0.0.1"),
+            port=int(os.getenv(f"STREAM_CASTER_{key}_PORT", "2101")),
+            passwords=_station_passwords(os.getenv(f"STREAM_CASTER_{key}_PASSWORDS", "")),
+        ))
+    return tuple(targets)
+
+
+STREAM_CASTER_TARGETS = _caster_targets(os.getenv("STREAM_CASTER_TARGETS", ""))
 
 LOG_FILE = os.getenv("STREAM_LOG_FILE", str(BASE_DIR / "streaming.log"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))

@@ -161,8 +161,8 @@ def find_file_begin(buf: bytes):
 def target_files(cmd: str) -> list[str]:
     """Which server-side file(s) a download command asks for.
 
-    Mirrors the firmware: downloadcf probes lowercase before uppercase
-    (quectel_downloadConfigFile), downloadfw asks for the encrypted image.
+    Mirrors the firmware: downloadcf probes lowercase before uppercase,
+    downloadfw asks for the encrypted image.
     """
     if cmd.startswith("downloadcf"):
         return ["config.txt", "CONFIG.TXT"]

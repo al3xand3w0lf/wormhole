@@ -18,6 +18,7 @@ from streaming.frames import (
     ROLE_BASE,
     ROLE_LOGGER,
     ROLE_ROVER,
+    ROLE_ROVER_NTRIP,
     ROLE_STREAM,
     ROLE_UNSET,
     CliResponse,
@@ -39,7 +40,8 @@ def test_ident():
     assert msg.role == ROLE_UNSET
 
 
-@pytest.mark.parametrize("role", [ROLE_UNSET, ROLE_BASE, ROLE_ROVER, ROLE_LOGGER, ROLE_STREAM])
+@pytest.mark.parametrize("role", [ROLE_UNSET, ROLE_BASE, ROLE_ROVER, ROLE_LOGGER,
+                                  ROLE_STREAM, ROLE_ROVER_NTRIP])
 def test_ident_role_byte(role):
     """The role byte a firmware that supports auto-discovery sends - see the
     module docstring for how each of these gets chosen on the device side."""

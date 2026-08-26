@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from pyubx2 import GET, UBXMessage
 
-from streaming.frames import ROLE_BASE, ROLE_LOGGER, ROLE_ROVER
+from streaming.frames import ROLE_BASE, ROLE_LOGGER, ROLE_ROVER, ROLE_ROVER_NTRIP
 from streaming.rover_discovery import BaseArpSink, RoverAutoDiscovery, RoverPositionSink
 
 from .helpers import rtcm3, rtcm3_1005
@@ -361,3 +361,89 @@ def test_repeated_arp_reports_for_the_same_base_are_a_no_op():
     d.on_base_position(1, BASE_A)  # a second 1005 from the same base
 
     assert router_a.add_calls == [2001]  # not called again
+
+
+# -- rover_ntrip: a rover we must NOT subscribe -------------------------
+#
+# It looks like a rover from every angle the server can see - it identifies as
+# one, it sends NAV-PVT, it wants RTK - which is exactly why it needs its own
+# wire value and its own tests. It fetches corrections from an NTRIP caster
+# itself and discards anything pushed to it, so a subscription would occupy a
+# slot and deliver nothing.
+
+
+def test_an_ntrip_rover_is_not_subscribed_even_with_a_fix():
+    router_a, router_b = _FakeRouter(), _FakeRouter()
+    d = _discovery({1: router_a, 2: router_b})
+    d.on_base_position(1, BASE_A)
+    d.on_base_position(2, BASE_B)
+
+    d.on_ident(2001, ROLE_ROVER_NTRIP)
+    d.on_rover_fix(2001, NEAR_A, fix_type=3)
+
+    assert router_a.add_calls == []
+    assert router_b.add_calls == []
+    assert 2001 not in d.rover_subscribed
+
+
+def test_an_ntrip_rover_survives_the_single_base_short_circuit():
+    """The sharp edge: with exactly one base there is no 'nearest' decision,
+    so _evaluate() subscribes immediately without waiting for a fix. That
+    shortcut must still be behind the role test, or the one configuration
+    where subscription is fastest is also the one where it is wrongest."""
+    router_a = _FakeRouter()
+    d = _discovery({1: router_a})
+    d.on_base_position(1, BASE_A)
+
+    d.on_ident(2001, ROLE_ROVER_NTRIP)
+
+    assert router_a.add_calls == []
+    assert 2001 not in d.rover_subscribed
+
+
+def test_a_base_coming_online_does_not_sweep_up_an_ntrip_rover():
+    """on_base_position() re-evaluates every known station. A role check that
+    exists in _evaluate() but not here would subscribe the NTRIP rover the
+    moment any base's ARP decoded."""
+    router_a = _FakeRouter()
+    d = _discovery({1: router_a})
+    d.on_ident(2001, ROLE_ROVER_NTRIP)
+    d.on_rover_fix(2001, NEAR_A, fix_type=3)
+
+    d.on_base_position(1, BASE_A)
+
+    assert router_a.add_calls == []
+
+
+def test_an_ntrip_rover_is_listed_with_its_reason_not_omitted():
+    """Absent and deliberately-skipped look identical to whoever is asking
+    where their rover went, so the policy has to say so out loud."""
+    d = _discovery({1: _FakeRouter()})
+    d.on_ident(2001, ROLE_ROVER_NTRIP)
+
+    entry = d.status()["2001"]
+    assert entry["subscribed_base"] is None
+    assert entry["not_a_candidate"] == "brings its own corrections (NTRIP)"
+    assert entry["has_fix"] is False
+
+
+def test_an_ordinary_rover_carries_no_not_a_candidate_key():
+    d = _discovery({1: _FakeRouter()})
+    d.on_ident(2001, ROLE_ROVER)
+
+    assert "not_a_candidate" not in d.status()["2001"]
+
+
+def test_an_unknown_future_role_is_never_a_candidate():
+    """The property that made ROLE_ROVER_NTRIP safe before anyone knew it
+    existed: candidacy is exact equality, so a role added on the device side
+    falls out instead of being guessed at."""
+    router_a = _FakeRouter()
+    d = _discovery({1: router_a})
+    d.on_base_position(1, BASE_A)
+
+    d.on_ident(2001, 99)
+    d.on_rover_fix(2001, NEAR_A, fix_type=3)
+
+    assert router_a.add_calls == []
+    assert "2001" not in d.status()

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from . import config
 from .frames import ROLE_BASE, ROLE_ROVER
 from .framer import StreamFramer
+from .ntrip import NtripCasterSink
 from .pipeline import decode_ident, is_ident, route_frame
 from .rover import RoverRouter, RoverSourceSink, ntrip_source
 from .rover_discovery import BaseArpSink, RoverAutoDiscovery, RoverPositionSink
@@ -67,6 +68,27 @@ def sweep_stale_raw() -> None:
 
 def _make_sinks(station_id: int) -> list:
     sinks = [FileSink(config.STREAM_DIR, station_id, raw_capture=config.STREAM_RAW_CAPTURE)]
+    # Additive, like the rover sinks below: the archive sink is never replaced.
+    # A station missing from STREAM_CASTER_PASSWORDS gets no caster push at all.
+    if config.STREAM_CASTER_ENABLE and station_id in config.STREAM_CASTER_PASSWORDS:
+        sinks.append(NtripCasterSink(
+            config.STREAM_CASTER_HOST, config.STREAM_CASTER_PORT,
+            str(station_id), config.STREAM_CASTER_PASSWORDS[station_id],
+        ))
+    # Any further casters named in STREAM_CASTER_TARGETS. Same station, same
+    # RTCM3, one sink per target - a station can go to the bundled caster above
+    # and any number of these at once. Each is independent: one caster being
+    # down or unprovisioned costs nothing but its own sink's reconnects.
+    for target in config.STREAM_CASTER_TARGETS:
+        password = target.passwords.get(station_id)
+        if password:
+            sinks.append(NtripCasterSink(target.host, target.port, str(station_id), password))
+        else:
+            logger.warning(
+                "station %s: caster target %r has no password for it "
+                "(STREAM_CASTER_%s_PASSWORDS) - not forwarded there",
+                station_id, target.name, target.name.upper().replace("-", "_"),
+            )
     # A base (statically configured in STREAM_ROVER_BASES, or auto-registered
     # via _ensure_base_router() the moment it identifies with role=base) feeds
     # its own rovers in-process: every RTCM3 frame it sends is published
@@ -288,6 +310,12 @@ async def rover_status(_: str = Depends(verify_api_key)):
     chose it - so a wrong subscription shows up here instead of being inferred
     from a bad fix. A candidate with subscribed_base=null and has_fix=false is
     holding for its first 3D fix (see rover_discovery.py's module docstring).
+
+    subscribed_base=null does NOT by itself mean "waiting": an entry carrying
+    "not_a_candidate" is a station that will never be subscribed and is listed
+    only so its absence from the subscription set reads as a decision. Today
+    that is role=rover_ntrip, which fetches its corrections from an NTRIP caster
+    itself and discards anything pushed to it.
     """
     routers = {f"base_{base_id}": r.status() for base_id, r in _base_routers.items()}
     if _rover_router is not None:
@@ -419,6 +447,20 @@ async def run() -> None:
     setup_logging()
     config.STREAM_DIR.mkdir(parents=True, exist_ok=True)
     sweep_stale_raw()
+
+    # --- NTRIP caster push (optional) ---------------------------------------
+    if config.STREAM_CASTER_ENABLE:
+        if config.STREAM_CASTER_PASSWORDS:
+            logger.info("ntrip caster push: %s:%d, stations %s",
+                        config.STREAM_CASTER_HOST, config.STREAM_CASTER_PORT,
+                        sorted(config.STREAM_CASTER_PASSWORDS))
+        else:
+            logger.warning(
+                "STREAM_CASTER_ENABLE is set but STREAM_CASTER_PASSWORDS is empty "
+                "- no station has a mountpoint, nothing will be pushed")
+    for target in config.STREAM_CASTER_TARGETS:
+        logger.info("ntrip caster push: %s:%d (%s), stations %s",
+                    target.host, target.port, target.name, sorted(target.passwords))
 
     # --- RTK rover correction downlink (optional) --------------------------
     # Off unless stations are named AND a source is configured. A half-configured

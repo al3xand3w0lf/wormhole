@@ -1,0 +1,12 @@
+[Unit]
+Description=Millipede NTRIP caster (bundled with wormhole)
+After=network.target
+
+[Service]
+ExecStart={{CASTER_BIN}} -c {{CASTER_YAML}}
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
