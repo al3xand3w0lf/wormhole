@@ -30,11 +30,9 @@ Wire format (little-endian, packed):
     0x0D  FILE_STATUS          dev->srv   [phase u8][code i8][bytes u32]
     0x0E  FILE_UP_BEGIN        dev->srv   [total u32][crc32 u32][name_len u8][name]
     0x0F  FILE_UP_DATA         dev->srv   [seq u16][bytes]
-    0x10  RTCM_DATA            srv->dev   one whole RTCM3 frame
-    0x11  RTCM_INFO            srv->dev   [base_id u16][flags u8]
-    0x12  NMEA_GGA             dev->srv   raw NMEA-GGA line, ASCII, no CRLF
     0x10  RTCM_DATA            srv->dev   exactly ONE whole RTCM3 frame
     0x11  RTCM_INFO            srv->dev   [base_id u16][flags u8]
+    0x12  NMEA_GGA             dev->srv   raw NMEA-GGA line, ASCII, no CRLF
 
 RTK rover downlink (streaming/rover.py): **one RTCM3 frame per envelope, never
 two and never half of one.** That contract is what lets the device stay free of
