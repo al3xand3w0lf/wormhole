@@ -6,7 +6,7 @@ from streaming.pipeline import route_frame
 from streaming.sinks import FileSink
 from streaming.station import StationSession
 
-from .helpers import ident, rawx, rtcm3, sensor
+from .helpers import ident, nmea_gga, rawx, rtcm3, sensor
 from streaming.frames import ID_SENSOR_INA219, ID_SENSOR_SHT4X
 
 WEEK = 2378
@@ -174,3 +174,46 @@ def test_ident_does_not_produce_a_ubx_file(tmp_path):
     session.close()
 
     assert not (tmp_path / "1001" / "ubx").exists()
+
+
+def test_nmea_lands_in_its_own_hourly_file_beside_the_ubx(tmp_path):
+    """The .nmea file must rotate on the same GPS hour as the .ubx.
+
+    That is the point of pairing them: two recordings of the same epochs whose
+    files can be lined up by name. A sentence is written with CRLF even though
+    the frame carried none - NMEA-0183 says so, and a strict parser cares.
+    """
+    session = make_session(tmp_path)
+    framer = StreamFramer()
+
+    gga = "$GNGGA,140000.00,4712.34567,N,00832.45678,E,4,12,0.8,512.3,M,47.1,M,1.2,1001*49"
+    feed(session, rawx(WEEK, TOW_H14), framer)
+    feed(session, nmea_gga(gga), framer)
+    session.close()
+
+    h14 = gps_to_datetime(WEEK, TOW_H14).strftime("%Y%m%d_%H")
+    path = tmp_path / "1001" / "nmea" / f"1001_gga_{h14}.nmea"
+    assert path.read_bytes() == gga.encode() + b"\r\n"
+
+    # Same hour key as the .ubx written from the same RAWX epoch.
+    assert (tmp_path / "1001" / "ubx" / f"1001_ubx_{h14}.ubx").exists()
+
+
+def test_a_sink_that_owns_no_file_survives_a_gga(tmp_path):
+    """on_nmea belongs to FileSink, not to the Sink base class.
+
+    Written into the base class it overrode the no-op stub, so every sink
+    inherited a writer for a file only FileSink owns. RoverPositionSink - which
+    a rover gets attached in addition to its FileSink - then raised
+    AttributeError on the first GGA, and the exception took the rover's whole
+    connection down: reconnect every 4 s for as long as the receiver had a fix.
+
+    The 242 tests in place at the time all passed, because none of them ever put
+    a non-FileSink in front of a GGA. This one does.
+    """
+    from streaming.rover_discovery import RoverPositionSink
+    from streaming.sinks import Sink
+
+    sink = RoverPositionSink(station_id=2001, discovery=object())
+    sink.on_nmea("$GNGGA,140000.00,,,,,0,00,99.99,,,,,,*56", None, False)
+    Sink().on_nmea("$GNGGA,140000.00,,,,,0,00,99.99,,,,,,*56", None, False)

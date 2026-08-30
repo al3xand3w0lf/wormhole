@@ -23,6 +23,7 @@ from .frames import (
     FileUpData,
     Heartbeat,
     Ident,
+    NmeaSentence,
     SensorReading,
     decode_private,
 )
@@ -136,6 +137,12 @@ def _route_private(session: StationSession, frame: Frame) -> None:
     if isinstance(msg, SensorReading):
         for sink in session.sinks:
             sink.on_sensor(msg, session.clock)
+        return
+
+    if isinstance(msg, NmeaSentence):
+        stamp, sysclk = session.stamp()
+        for sink in session.sinks:
+            sink.on_nmea(msg.text, stamp, sysclk)
         return
 
     if isinstance(msg, CliResponse):

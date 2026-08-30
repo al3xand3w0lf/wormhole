@@ -9,6 +9,7 @@ from streaming.frames import (
     ID_CLI_RESPONSE,
     ID_HEARTBEAT,
     ID_IDENT,
+    ID_NMEA_GGA,
     build_ubx,
 )
 
@@ -82,6 +83,11 @@ def heartbeat() -> bytes:
 
 def cli_response(text: str, last: bool) -> bytes:
     return ubx(PRIVATE_CLASS, ID_CLI_RESPONSE, bytes([1 if last else 0]) + text.encode())
+
+
+def nmea_gga(text: str) -> bytes:
+    """The device sends the sentence WITHOUT its CRLF."""
+    return ubx(PRIVATE_CLASS, ID_NMEA_GGA, text.encode("ascii"))
 
 
 def sensor(msg_id: int, fmt: str, rtc_unix: int, *values: int) -> bytes:

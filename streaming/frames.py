@@ -30,6 +30,9 @@ Wire format (little-endian, packed):
     0x0D  FILE_STATUS          dev->srv   [phase u8][code i8][bytes u32]
     0x0E  FILE_UP_BEGIN        dev->srv   [total u32][crc32 u32][name_len u8][name]
     0x0F  FILE_UP_DATA         dev->srv   [seq u16][bytes]
+    0x10  RTCM_DATA            srv->dev   one whole RTCM3 frame
+    0x11  RTCM_INFO            srv->dev   [base_id u16][flags u8]
+    0x12  NMEA_GGA             dev->srv   raw NMEA-GGA line, ASCII, no CRLF
     0x10  RTCM_DATA            srv->dev   exactly ONE whole RTCM3 frame
     0x11  RTCM_INFO            srv->dev   [base_id u16][flags u8]
 
@@ -105,6 +108,7 @@ ID_FILE_UP_BEGIN = 0x0E
 ID_FILE_UP_DATA = 0x0F
 ID_RTCM_DATA = 0x10
 ID_RTCM_INFO = 0x11
+ID_NMEA_GGA = 0x12
 
 # An RTCM3 frame is 3 B header + up to 1023 B payload + 3 B CRC-24Q. Size your
 # device's inbound buffer to the same ceiling, or anything above this could
@@ -141,6 +145,21 @@ class Ident:
 @dataclass(frozen=True)
 class Heartbeat:
     pass
+
+
+@dataclass(frozen=True)
+class NmeaSentence:
+    """One NMEA sentence as the RECEIVER emitted it (device -> server).
+
+    Deliberately not a SENSOR_SPECS row: those are fixed binary structs with a
+    device timestamp, this is text that carries its own UTC field. It is also
+    kept verbatim - talker included, checksum included. The device has already
+    verified that checksum; re-normalising the line here (say, rewriting $GNGGA
+    to $GPGGA) would invalidate it and produce a file whose sentences no longer
+    match what any receiver said.
+    """
+
+    text: str
 
 
 @dataclass(frozen=True)
@@ -250,6 +269,15 @@ def decode_private(raw: bytes):
         # — fall back to ROLE_UNSET rather than rejecting the whole IDENT.
         role = payload[4] if len(payload) >= 5 else ROLE_UNSET
         return Ident(station_id, role)
+
+    if msg_id == ID_NMEA_GGA:
+        if not payload:
+            return None
+        # errors="replace" rather than a raise: a corrupted byte must not kill
+        # the connection's frame loop over a sentence the device already
+        # checksummed. A visible replacement char in the file is the honest
+        # record of what arrived.
+        return NmeaSentence(payload.decode("ascii", errors="replace").strip())
 
     if msg_id == ID_CLI_RESPONSE:
         if len(payload) < 1:

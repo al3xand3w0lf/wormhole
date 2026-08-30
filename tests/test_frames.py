@@ -13,6 +13,7 @@ from streaming.frames import (
     ID_SENSOR_ADXL345_EXT,
     ID_SENSOR_INA219,
     ID_SENSOR_INA219_EXT,
+    ID_NMEA_GGA,
     ID_SENSOR_LPS28DFW,
     ID_SENSOR_SHT4X,
     ROLE_BASE,
@@ -24,6 +25,7 @@ from streaming.frames import (
     CliResponse,
     Heartbeat,
     Ident,
+    NmeaSentence,
     SensorReading,
     build_ubx,
     decode_private,
@@ -31,7 +33,7 @@ from streaming.frames import (
     ubx_payload,
 )
 
-from .helpers import cli_response, heartbeat, ident, sensor
+from .helpers import cli_response, heartbeat, ident, nmea_gga, sensor
 
 
 def test_ident():
@@ -95,6 +97,34 @@ def test_internal_and_external_are_distinguishable():
     a = decode_private(sensor(ID_SENSOR_INA219, "<Iiii", 1, 1, 2, 3))
     b = decode_private(sensor(ID_SENSOR_INA219_EXT, "<Iiii", 1, 1, 2, 3))
     assert a.stream != b.stream
+
+
+GGA_FIXED = (
+    "$GNGGA,123519.00,4712.34567,N,00832.45678,E,4,12,0.8,"
+    "512.34,M,47.12,M,1.2,1001*4C"
+)
+
+
+def test_nmea_gga_decodes_verbatim():
+    msg = decode_private(nmea_gga(GGA_FIXED))
+    assert isinstance(msg, NmeaSentence)
+    # Verbatim matters: the talker stays GN and the checksum still covers the
+    # line. Normalising it here would produce a sentence no receiver emitted.
+    assert msg.text == GGA_FIXED
+
+
+def test_nmea_gga_is_not_a_sensor_reading():
+    """It carries text and its own UTC field, so it must not enter the CSV path."""
+    from streaming.frames import SENSOR_SPECS
+
+    assert ID_NMEA_GGA not in SENSOR_SPECS
+    assert not isinstance(decode_private(nmea_gga(GGA_FIXED)), SensorReading)
+
+
+def test_nmea_gga_empty_payload_returns_none():
+    from streaming.frames import build_ubx
+
+    assert decode_private(build_ubx(PRIVATE_CLASS, ID_NMEA_GGA, b"")) is None
 
 
 def test_unknown_id_returns_none():

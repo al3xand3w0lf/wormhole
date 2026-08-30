@@ -8,6 +8,7 @@ File layout (per station, under STREAM_DIR):
 
     <stationId>/ubx/     <station>_ubx_YYYYMMDD_HH.ubx      hourly, GPS-time hour
                 rtcm3/   <station>_rtcm3_YYYYMMDD_HH.rtcm3  hourly
+                nmea/    <station>_gga_YYYYMMDD_HH.nmea      hourly, receiver NMEA-GGA
                 sensors/ <station>_<stream>_YYYYMMDD.csv    daily, append
                 raw/     <station>_raw_YYYYMMDD_HH.bin      hourly, transport mitschnitt
                 cli/     <station>_cli_YYYYMMDD.log
@@ -45,6 +46,9 @@ class Sink:
 
     def on_sensor(self, reading: SensorReading, clock: GnssClock) -> None:
         pass
+
+    def on_nmea(self, text: str, stamp: datetime, sysclk: bool) -> None:
+        """One NMEA sentence from the receiver, without its CRLF."""
 
     def on_cli(self, line: str, stamp: datetime, sysclk: bool) -> None:
         pass
@@ -133,6 +137,11 @@ class FileSink(Sink):
         self._ubx = _BinaryStream(base / "ubx", "{station}_ubx_{key}.ubx")
         self._rtcm3 = _BinaryStream(base / "rtcm3", "{station}_rtcm3_{key}.rtcm3")
         self._raw = _BinaryStream(base / "raw", "{station}_raw_{key}.bin")
+        # Binary rather than text mode so the line ending is ours to control:
+        # NMEA-0183 sentences end in CRLF, and a file opened in text mode on a
+        # POSIX host would silently write LF and produce sentences no strict
+        # parser accepts.
+        self._nmea = _BinaryStream(base / "nmea", "{station}_gga_{key}.nmea")
         self._cli = _CsvStream(
             base / "cli", "{station}_cli_{key}.log", ("timestamp", "direction", "text")
         )
@@ -144,6 +153,22 @@ class FileSink(Sink):
 
     def on_rtcm3(self, raw: bytes, stamp: datetime, sysclk: bool) -> None:
         self._rtcm3.write(raw, hour_key(stamp, sysclk), self.station)
+
+    def on_nmea(self, text: str, stamp: datetime, sysclk: bool) -> None:
+        # Hourly and GPS-keyed like the .ubx file: the two describe the same
+        # epochs, and files that rotate on different clocks are the awkward part
+        # of pairing them up afterwards.
+        #
+        # Belongs to FileSink, NOT to Sink: it was first written into the base
+        # class, where it overrode the no-op stub and handed every sink a writer
+        # for a file only this one owns. RoverPositionSink then died on the first
+        # GGA with AttributeError, taking the rover's connection down with it -
+        # a reconnect every 4 s for as long as the rover had a fix.
+        self._nmea.write(
+            text.encode("ascii", errors="replace") + b"\r\n",
+            hour_key(stamp, sysclk),
+            self.station,
+        )
 
     def on_raw(self, data: bytes) -> None:
         # The raw capture is a *transport* recording: it answers "when did these
@@ -194,7 +219,7 @@ class FileSink(Sink):
         writer.write_row(row, day_key(gps_dt, sysclk=False), self.station)
 
     def close(self) -> None:
-        for stream in (self._ubx, self._rtcm3, self._raw, self._cli):
+        for stream in (self._ubx, self._rtcm3, self._raw, self._cli, self._nmea):
             stream.close()
         for writer in self._sensors.values():
             writer.close()
