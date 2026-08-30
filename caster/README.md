@@ -123,13 +123,44 @@ are virtual bases carrying `1` there, so copying them as a template produces
 an unpushable mountpoint. `generate_config.py` always writes `0` — if you
 ever hand-edit `sourcetable.dat`, keep it that way.
 
+## Nearest-base routing ("NEAR")
+
+Millipede can route a client to whichever real mountpoint is geographically
+closest to it, automatically — a rover just connects to a fixed virtual
+mountpoint named `NEAR` and sends its position as NMEA GGA on the same socket;
+Millipede computes the distance to every real `STR` entry in the sourcetable
+and proxies through the nearest one, re-checking as the client moves
+(`caster/millipede-caster/caster/ntripsrv.c`, `ntripsrv_redo_virtual_pos()`).
+Nothing in this repo implements the selection itself — it is entirely
+Millipede's own sourcetable-driven feature; see its own
+[`README.md`](millipede-caster/README.md#near-base) for the mechanism.
+
+`generate_config.py` sets this up for you:
+
+- It decodes each station's real position from its own RTCM 1005/1006 ARP,
+  read from the most recent file in its `.rtcm3` archive
+  (`STREAM_DIR/<id>/rtcm3/`), and writes it into that station's `STR` line —
+  the real position is what NEAR actually compares against, so a mountpoint
+  stuck at the `0.00/0.00` placeholder can never be correctly selected as
+  nearest. A station with no archive yet (never pushed a frame) keeps the
+  placeholder until you re-run `generate_config.py` after it has.
+- A `STR;NEAR;...` line (the "virtual" field set, per Millipede's own
+  convention) is added automatically once at least one station has a real
+  position — no separate flag to turn on.
+
+**With only one real base this is a harmless no-op** — there is nothing to be
+"nearer" than — and starts actually selecting the moment a second station gets
+its own decoded position. See `docs/millipede-near-base-2026-08-28.md` for the
+current state of this deployment and the rover-side `config.txt` block
+(`ntrip_mountpoint = NEAR`, `ntrip_send_gga = 1`).
+
 ## Not set up here
 
-TLS, the `proxy`/"NEAR" virtual-base features, Graylog/GELF export, and the
-admin JSON API (`admin_user` needs a password mechanism this setup doesn't
-configure) are all things Millipede supports but this bundled setup doesn't
-turn on. `caster/millipede-caster/etc/caster.yaml` is a real config file —
-edit it directly for any of that (re-running `generate_config.py` will
-overwrite the parts it manages: `listen`, the `*_file` paths, and the log
-section, so keep any manual additions in the parts it leaves alone, or copy
-them back in after re-running).
+TLS, the `proxy` feature (fetching a mountpoint from another caster), Graylog/
+GELF export, and the admin JSON API (`admin_user` needs a password mechanism
+this setup doesn't configure) are all things Millipede supports but this
+bundled setup doesn't turn on. `caster/millipede-caster/etc/caster.yaml` is a
+real config file — edit it directly for any of that (re-running
+`generate_config.py` will overwrite the parts it manages: `listen`, the
+`*_file` paths, and the log section, so keep any manual additions in the parts
+it leaves alone, or copy them back in after re-running).
