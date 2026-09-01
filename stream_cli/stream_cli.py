@@ -19,6 +19,7 @@ servers use), so it just works:
     python stream_cli/stream_cli.py sysinfo           # one-shot: send, print, exit
     python stream_cli/stream_cli.py --station 1001 whoami
     python stream_cli/stream_cli.py --list            # just list connected stations
+    python stream_cli/stream_cli.py --list-all        # ... plus the remembered, offline ones
 
 Config resolution (first hit wins), for both the API key and the admin URL:
     1. --api-key / --url on the command line
@@ -27,7 +28,7 @@ Config resolution (first hit wins), for both the API key and the admin URL:
     4. the CONFIG defaults below (for copying onto a machine without the .env)
 
 REPL meta-commands (leading /):
-    /stations        re-list connected stations
+    /stations        re-list connected stations ("/stations all" adds the offline ones)
     /station <id>    switch the active station
     /help            show device allowlist + meta-commands
     /quit, /exit     leave (Ctrl-D works too)
@@ -120,17 +121,40 @@ def fetch_stations(ctx) -> list[dict]:
     return _get("/stream/stations", ctx, NORMAL_HTTP_TIMEOUT).get("stations", [])
 
 
-def print_stations(stations: list[dict]) -> None:
+def print_stations(stations: list[dict], show_all: bool = False) -> None:
+    """Print the station table. By default only the *connected* stations — those
+    are the ones a command can actually be sent to; a disconnected entry is a
+    station the server still remembers (sessions are keyed by station id and
+    outlive the connection), and listing it next to a live one only invites
+    sending a command into the void. `show_all` prints the remembered ones too,
+    connected first, with the `connected` column that then carries information."""
     if not stations:
         print("(no stations known to the server yet)")
         return
-    print(f"{'station':>8}  {'connected':>9}  {'gps_time':<27}  {'pending':>7}  peer")
-    for s in stations:
+
+    connected = [s for s in stations if s.get("connected")]
+    offline = [s for s in stations if not s.get("connected")]
+    rows = connected + offline if show_all else connected
+
+    if not rows:
+        print(f"(no station connected; {len(offline)} known to the server — "
+              f"use --list-all / '/stations all' to see them)")
+        return
+
+    if show_all:
+        print(f"{'station':>8}  {'connected':>9}  {'gps_time':<27}  {'pending':>7}  peer")
+    else:
+        print(f"{'station':>8}  {'gps_time':<27}  {'pending':>7}  peer")
+    for s in rows:
+        connected_col = f"{str(s['connected']):>9}  " if show_all else ""
         print(
-            f"{s['station_id']:>8}  {str(s['connected']):>9}  "
+            f"{s['station_id']:>8}  {connected_col}"
             f"{str(s.get('gps_time')):<27}  {str(s.get('cli_pending')):>7}  "
             f"{s.get('peer') or '-'}"
         )
+    if offline and not show_all:
+        print(f"({len(offline)} further station(s) known but not connected — "
+              f"use --list-all / '/stations all' to see them)")
 
 
 def send_cmd(station: int, cmd: str, ctx, body_timeout: Optional[float]) -> Optional[str]:
@@ -159,11 +183,60 @@ def send_cmd(station: int, cmd: str, ctx, body_timeout: Optional[float]) -> Opti
     return None
 
 
+def resolve_config(url: Optional[str] = None, api_key: Optional[str] = None) -> None:
+    """Set the module-level ADMIN_URL / API_KEY from flags > env > .env > defaults.
+
+    Split out of main() so a second front-end (stream_menu.py) resolves the admin
+    endpoint the *same* way rather than growing a second copy that drifts."""
+    global ADMIN_URL, API_KEY
+    env_file = load_env_file()
+
+    # API key: flag > $API_KEY > .env > CONFIG default.
+    API_KEY = api_key or os.getenv("API_KEY") or env_file.get("API_KEY") or API_KEY
+
+    # Admin URL: flag > $STREAM_ADMIN_URL > built from .env's port > CONFIG default.
+    # STREAM_HOST in .env is the *bind* address (often 0.0.0.0) — never a connect
+    # target — so we always dial 127.0.0.1 and only take the port from .env.
+    if url:
+        ADMIN_URL = url
+    elif os.getenv("STREAM_ADMIN_URL"):
+        ADMIN_URL = os.getenv("STREAM_ADMIN_URL")
+    elif env_file.get("STREAM_ADMIN_PORT"):
+        ADMIN_URL = f"http://127.0.0.1:{env_file['STREAM_ADMIN_PORT']}"
+
+    if API_KEY == "changeme":
+        print("warning: no API key found (.env, $API_KEY, --api-key all absent) - "
+              "using the 'changeme' placeholder; expect HTTP 401.", file=sys.stderr)
+
+
+def is_connected(stations: list[dict], station: int) -> bool:
+    return any(s["station_id"] == station and s.get("connected") for s in stations)
+
+
+def is_known(stations: list[dict], station: int) -> bool:
+    return any(s["station_id"] == station for s in stations)
+
+
 def pick_station(stations: list[dict], want: Optional[int]) -> Optional[int]:
-    """Resolve the active station: explicit --station, else the sole connected one."""
+    """Resolve the active station: explicit --station, else the sole connected one.
+
+    An explicit --station is *verified*, not just trusted: the server keeps a session
+    per station id long after the socket is gone, so `--station 1010` on a station
+    that went away used to open a prompt that could never reach a device — every
+    command would sit there until the CLI timeout. Refuse up front instead."""
+    connected = [s["station_id"] for s in stations if s.get("connected")]
     if want is not None:
-        return want
-    connected = [s["station_id"] for s in stations if s["connected"]]
+        if want in connected:
+            return want
+        if is_known(stations, want):
+            print(f"Station {want} is known to the server but NOT connected — "
+                  f"no command can reach it.", file=sys.stderr)
+        else:
+            print(f"Station {want} is unknown to this server "
+                  f"(wrong instance, or it never connected).", file=sys.stderr)
+        if connected:
+            print(f"Connected right now: {connected}", file=sys.stderr)
+        return None
     if len(connected) == 1:
         return connected[0]
     if not connected:
@@ -198,18 +271,34 @@ def repl(station: int, ctx, body_timeout: Optional[float]) -> int:
                 return 0
             if meta == "help":
                 print(f"  device allowlist: {', '.join(ALLOWLIST)}")
-                print("  meta: /stations, /station <id>, /help, /quit")
+                print("  meta: /stations [all], /station <id>, /help, /quit")
                 continue
             if meta == "stations":
+                show_all = len(parts) > 1 and parts[1].lower() in ("all", "-a", "--all")
                 try:
-                    print_stations(fetch_stations(ctx))
+                    print_stations(fetch_stations(ctx), show_all=show_all)
                 except (urllib.error.URLError, urllib.error.HTTPError) as e:
                     print(f"  ! {e}", file=sys.stderr)
                 continue
             if meta == "station":
                 if len(parts) == 2 and parts[1].isdigit():
-                    station = int(parts[1])
-                    print(f"  active station -> {station}")
+                    target = int(parts[1])
+                    # Re-fetch rather than trust a list from REPL start: a station may
+                    # have dropped (or come back) while the prompt sat idle.
+                    try:
+                        current = fetch_stations(ctx)
+                    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                        print(f"  ! {e}", file=sys.stderr)
+                        continue
+                    if is_connected(current, target):
+                        station = target
+                        print(f"  active station -> {station}")
+                    elif is_known(current, target):
+                        print(f"  ! station {target} is known but not connected — "
+                              f"staying on {station}", file=sys.stderr)
+                    else:
+                        print(f"  ! station {target} is unknown to this server — "
+                              f"staying on {station}", file=sys.stderr)
                 else:
                     print("  usage: /station <id>", file=sys.stderr)
                 continue
@@ -222,8 +311,6 @@ def repl(station: int, ctx, body_timeout: Optional[float]) -> int:
 
 
 def main() -> int:
-    global ADMIN_URL, API_KEY
-
     parser = argparse.ArgumentParser(
         description="Interactive terminal for the streaming server's remote CLI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -237,27 +324,14 @@ def main() -> int:
     parser.add_argument("--api-key", default=None, help="X-API-Key (default: from .env)")
     parser.add_argument("--timeout", type=float, default=None,
                         help="Server-side wait for the response, seconds (default: server's own)")
-    parser.add_argument("--list", action="store_true", help="List connected stations and exit")
+    parser.add_argument("--list", action="store_true",
+                        help="List the connected stations and exit")
+    parser.add_argument("--list-all", action="store_true",
+                        help="Like --list, but also the stations the server only "
+                             "remembers (connected=False)")
     args = parser.parse_args()
 
-    env_file = load_env_file()
-
-    # API key: flag > $API_KEY > .env > CONFIG default.
-    API_KEY = args.api_key or os.getenv("API_KEY") or env_file.get("API_KEY") or API_KEY
-
-    # Admin URL: flag > $STREAM_ADMIN_URL > built from .env's port > CONFIG default.
-    # STREAM_HOST in .env is the *bind* address (often 0.0.0.0) — never a connect
-    # target — so we always dial 127.0.0.1 and only take the port from .env.
-    if args.url:
-        ADMIN_URL = args.url
-    elif os.getenv("STREAM_ADMIN_URL"):
-        ADMIN_URL = os.getenv("STREAM_ADMIN_URL")
-    elif env_file.get("STREAM_ADMIN_PORT"):
-        ADMIN_URL = f"http://127.0.0.1:{env_file['STREAM_ADMIN_PORT']}"
-
-    if API_KEY == "changeme":
-        print("warning: no API key found (.env, $API_KEY, --api-key all absent) - "
-              "using the 'changeme' placeholder; expect HTTP 401.", file=sys.stderr)
+    resolve_config(args.url, args.api_key)
 
     ctx = ssl_context()
 
@@ -270,13 +344,16 @@ def main() -> int:
         print(f"FAILED: could not reach {ADMIN_URL}: {e.reason}", file=sys.stderr)
         return 1
 
-    if args.list:
-        print_stations(stations)
+    if args.list or args.list_all:
+        print_stations(stations, show_all=args.list_all)
         return 0
 
     station = pick_station(stations, args.station)
     if station is None:
-        print_stations(stations)
+        # Nothing to send to — show the full picture here, including the
+        # remembered-but-offline stations: that is exactly the context needed
+        # to tell "wrong server" from "device not connected right now".
+        print_stations(stations, show_all=True)
         return 2
 
     # One-shot mode: everything after the flags is a single command.

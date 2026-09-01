@@ -273,9 +273,17 @@ Python standard library only, and no configuration on the server host: it reads
 
 ```bash
 python stream_cli/stream_cli.py --list             # connected stations
+python stream_cli/stream_cli.py --list-all         # ... plus the ones only remembered
 python stream_cli/stream_cli.py --station 1001     # REPL: type sysinfo, whoami, ...
 python stream_cli/stream_cli.py --station 1001 sysinfo   # one-shot
+
+python stream_cli/stream_menu.py                   # menu: pick station, pick command
 ```
+
+`stream_menu.py` is a menu in front of the same endpoint for operators who would
+rather not type: it lists the connected stations, then the device commands — read
+straight out of the allowlist table in `stream_cli_commands.md`, so the doc is the
+command list — and `t` hands off to the REPL above.
 
 It holds no frame logic and never talks to a device directly — the server owns the
 secret, the response reassembly and the disconnect/reconnect transfer dance. Because
