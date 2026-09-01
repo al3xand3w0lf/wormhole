@@ -113,6 +113,31 @@ def test_nmea_gga_decodes_verbatim():
     assert msg.text == GGA_FIXED
 
 
+# A REAL sentence off a rover receiver with high-precision NMEA enabled (u-blox
+# CFG-NMEA-HIGHPREC): 7 decimals of minutes and 3 for altitude, which takes the
+# line to 88 characters - past the NMEA-0183 cap of 82 that the receiver breaks
+# on purpose (its interface description forbids combining high precision with
+# the 82-character limit mode for exactly this reason).
+GGA_HIGHPREC = (
+    "$GNGGA,064416.00,4724.4986963,N,00830.3503494,E,4,12,0.54,"
+    "526.634,M,47.343,M,1.0,1001*61"
+)
+
+
+def test_nmea_gga_highprec_survives_the_82_char_limit():
+    """A high-precision GGA is longer than NMEA-0183 allows, and must pass anyway.
+
+    The whole value of the high-precision mode is in the extra decimals: a
+    length check anywhere on this path would silently drop the very sentences
+    the rover exists to produce, and only for the stations that actually reach
+    an RTK fix. Nothing here may bound a sentence at 82.
+    """
+    assert len(GGA_HIGHPREC) > 82
+    msg = decode_private(nmea_gga(GGA_HIGHPREC))
+    assert isinstance(msg, NmeaSentence)
+    assert msg.text == GGA_HIGHPREC
+
+
 def test_nmea_gga_is_not_a_sensor_reading():
     """It carries text and its own UTC field, so it must not enter the CSV path."""
     from streaming.frames import SENSOR_SPECS

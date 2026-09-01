@@ -33,6 +33,19 @@ Wire format (little-endian, packed):
     0x10  RTCM_DATA            srv->dev   exactly ONE whole RTCM3 frame
     0x11  RTCM_INFO            srv->dev   [base_id u16][flags u8]
     0x12  NMEA_GGA             dev->srv   raw NMEA-GGA line, ASCII, no CRLF
+                                            (may EXCEED the NMEA-0183 82-char
+                                            cap - see the note below)
+
+⚠️ A NMEA_GGA payload is NOT bounded by the NMEA-0183 limit of 82 characters.
+A rover receiver configured for high-precision NMEA (on u-blox:
+CFG-NMEA-HIGHPREC) breaks that limit on purpose, and its documentation says so:
+7 decimals of minutes for lat/lon (~0.2 mm) and 3 for altitude, against 5/2
+(~1.8 cm) otherwise. A fixed rover sentence with age and reference-station ID
+measures 88 characters. The sentence is stored and forwarded VERBATIM and
+nothing on this path may bound, truncate or re-format it - such a check would
+drop exactly the sentences from the stations that reached an RTK fix, and
+nowhere else. Regression tests: tests/test_frames.py and tests/test_sinks.py,
+both on a real 88-char line.
 
 RTK rover downlink (streaming/rover.py): **one RTCM3 frame per envelope, never
 two and never half of one.** That contract is what lets the device stay free of

@@ -199,6 +199,31 @@ def test_nmea_lands_in_its_own_hourly_file_beside_the_ubx(tmp_path):
     assert (tmp_path / "1001" / "ubx" / f"1001_ubx_{h14}.ubx").exists()
 
 
+def test_nmea_file_carries_a_highprec_sentence_verbatim(tmp_path):
+    """88 characters, straight off a rover receiver, into the file unchanged.
+
+    High-precision NMEA (u-blox CFG-NMEA-HIGHPREC) deliberately exceeds the
+    NMEA-0183 cap of 82 to gain 7 decimals of minutes and 3 for altitude. The
+    file is the analysis product, so a truncation or a length check here would
+    throw away precisely the precision the RTK fix was for.
+    """
+    session = make_session(tmp_path)
+    framer = StreamFramer()
+
+    gga = (
+        "$GNGGA,064416.00,4724.4986963,N,00830.3503494,E,4,12,0.54,"
+        "526.634,M,47.343,M,1.0,1001*61"
+    )
+    assert len(gga) > 82
+    feed(session, rawx(WEEK, TOW_H14), framer)
+    feed(session, nmea_gga(gga), framer)
+    session.close()
+
+    h14 = gps_to_datetime(WEEK, TOW_H14).strftime("%Y%m%d_%H")
+    path = tmp_path / "1001" / "nmea" / f"1001_gga_{h14}.nmea"
+    assert path.read_bytes() == gga.encode() + b"\r\n"
+
+
 def test_a_sink_that_owns_no_file_survives_a_gga(tmp_path):
     """on_nmea belongs to FileSink, not to the Sink base class.
 
