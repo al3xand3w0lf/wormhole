@@ -72,7 +72,7 @@ NAV_PVT_ID = 0x07
 FIX_3D = 3
 
 
-def _decode_arp(raw: bytes) -> tuple[float, float, float] | None:
+def decode_arp(raw: bytes) -> tuple[float, float, float] | None:
     """A base station's own ARP (DF025/026/027), from its first 1005/1006.
 
     Same pyrtcm-first-then-getattr pattern as rover.py's
@@ -112,7 +112,7 @@ class BaseArpSink(Sink):
         self.router.publish(raw)
         if self._arp_done:
             return
-        arp = _decode_arp(raw)
+        arp = decode_arp(raw)
         if arp is not None:
             self._arp_done = True
             self.discovery.on_base_position(self.station_id, arp)

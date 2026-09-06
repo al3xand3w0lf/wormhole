@@ -234,9 +234,9 @@ def test_make_sinks_attaches_one_sink_per_configured_target(monkeypatch):
     casters_1002 = [s for s in server._make_sinks(1002) if isinstance(s, NtripCasterSink)]
 
     # The same station goes to every target that has a mountpoint for it...
-    assert sorted(s._port for s in casters_1001) == [2102, 2104]
+    assert sorted(s.port for s in casters_1001) == [2102, 2104]
     # ... and a station only provisioned on one caster reaches only that one.
-    assert [s._port for s in casters_1002] == [2104]
+    assert [s.port for s in casters_1002] == [2104]
 
 
 def test_make_sinks_combines_the_bundled_caster_with_extra_targets(monkeypatch):
@@ -251,4 +251,4 @@ def test_make_sinks_combines_the_bundled_caster_with_extra_targets(monkeypatch):
     ))
 
     casters = [s for s in server._make_sinks(1001) if isinstance(s, NtripCasterSink)]
-    assert sorted(s._port for s in casters) == [2101, 2104]
+    assert sorted(s.port for s in casters) == [2101, 2104]

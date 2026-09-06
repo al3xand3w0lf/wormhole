@@ -101,13 +101,25 @@ parsed.
 
 ## Adding a station later
 
-Edit `STREAM_CASTER_STATIONS` in `.env`, then:
+With `STREAM_CASTER_AUTO_ENABLE=true` in `.env` there is nothing to do: a
+station that identifies with `role=base` provisions itself the moment it
+connects — password generated, both files below rewritten, caster SIGHUPed, push
+started on the live session, and `STREAM_CASTER_STATIONS` /
+`STREAM_CASTER_PASSWORDS` written back into `.env`. See `GET /stream/caster` on
+the admin port to see what it did.
+
+By hand, or for a station that is not a base: edit `STREAM_CASTER_STATIONS` in
+`.env`, then
 
 ```bash
 python3 generate_config.py   # regenerates the sourcetable + adds a password
                               # for the new station only
 sudo systemctl reload millipede-caster   # or: systemctl --user reload ...
 ```
+
+Both paths render `sourcetable.dat` / `source.auth` through the same code
+(`streaming/caster_config.py`) and keep each other's stations and passwords, so
+running the script after an auto-provisioning is safe and changes nothing.
 
 A `SIGHUP`/reload does **not** drop already-connected sources — you can add a
 mountpoint without interrupting a station that's already pushing.

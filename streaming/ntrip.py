@@ -48,9 +48,9 @@ class NtripCasterSink(Sink):
     """
 
     def __init__(self, host: str, port: int, mountpoint: str, password: str):
-        self._host = host
-        self._port = port
-        self._mountpoint = mountpoint
+        self.host = host
+        self.port = port
+        self.mountpoint = mountpoint
         self._password = password
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
         self._task: asyncio.Task | None = None
@@ -61,9 +61,9 @@ class NtripCasterSink(Sink):
                 self._task = asyncio.get_running_loop().create_task(self._run())
             self._queue.put_nowait(raw)
         except asyncio.QueueFull:
-            logger.debug("ntrip caster %s: queue full, dropping frame", self._mountpoint)
+            logger.debug("ntrip caster %s: queue full, dropping frame", self.mountpoint)
         except Exception as exc:  # noqa: BLE001 - must never propagate into route_frame
-            logger.debug("ntrip caster %s: on_rtcm3 failed: %s", self._mountpoint, exc)
+            logger.debug("ntrip caster %s: on_rtcm3 failed: %s", self.mountpoint, exc)
 
     async def _run(self) -> None:
         while True:
@@ -72,7 +72,7 @@ class NtripCasterSink(Sink):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a caster outage must never kill the loop
-                logger.debug("ntrip caster %s: %s", self._mountpoint, exc)
+                logger.debug("ntrip caster %s: %s", self.mountpoint, exc)
             await asyncio.sleep(_RECONNECT_DELAY)
 
     async def _push_until_broken(self) -> None:
@@ -80,12 +80,12 @@ class NtripCasterSink(Sink):
         # longer than TCP's own retries would suggest — bound it explicitly so one
         # bad host cannot stall this station's reconnect loop indefinitely.
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(self._host, self._port), timeout=_CONNECT_TIMEOUT
+            asyncio.open_connection(self.host, self.port), timeout=_CONNECT_TIMEOUT
         )
         try:
             request = (
                 b"SOURCE " + self._password.encode("ascii") + b" "
-                + self._mountpoint.encode("ascii") + b"\r\n"
+                + self.mountpoint.encode("ascii") + b"\r\n"
                 + b"Source-Agent: " + _SOURCE_AGENT + b"\r\n"
                 + b"\r\n"
             )
@@ -95,11 +95,11 @@ class NtripCasterSink(Sink):
             response = await asyncio.wait_for(reader.readline(), timeout=_HANDSHAKE_TIMEOUT)
             if not response.upper().startswith(b"ICY 200"):
                 logger.warning(
-                    "ntrip caster %s: handshake rejected: %r", self._mountpoint, response
+                    "ntrip caster %s: handshake rejected: %r", self.mountpoint, response
                 )
                 return
 
-            logger.info("ntrip caster %s: connected to %s:%d", self._mountpoint, self._host, self._port)
+            logger.info("ntrip caster %s: connected to %s:%d", self.mountpoint, self.host, self.port)
             while True:
                 data = await self._queue.get()
                 writer.write(data)

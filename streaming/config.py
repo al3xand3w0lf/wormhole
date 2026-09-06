@@ -157,6 +157,39 @@ def _station_passwords(value: str) -> dict[int, str]:
 
 STREAM_CASTER_PASSWORDS = _station_passwords(os.getenv("STREAM_CASTER_PASSWORDS", ""))
 
+# The stations that have (or should have) a mountpoint on the bundled caster.
+# caster/generate_config.py provisions from this list at setup time; the server
+# reads it too, because the auto-provisioner below has to render the *complete*
+# sourcetable, not just the station in front of it.
+_caster_stations = os.getenv("STREAM_CASTER_STATIONS", "").replace(";", ",")
+STREAM_CASTER_STATIONS = {int(s) for s in (p.strip() for p in _caster_stations.split(","))
+                          if s.isdigit()}
+
+# Automatic mountpoint provisioning: a station that identifies with role=base
+# (IDENT) gets a mountpoint on the *bundled* caster the moment it connects -
+# password generated, sourcetable/source.auth rewritten, caster SIGHUPed, sink
+# attached live. No .env edit, no restart, no setup.sh re-run.
+#
+# The role byte alone is the gate, deliberately - see caster_provision.py's
+# module docstring for why that is the right trade here and the wrong one in
+# rover_discovery.py, which gates the same claim much harder. Off by default:
+# it writes files (caster/millipede-caster/etc/, .env) and publishes a station
+# under its own name, which is a decision a deployment should make on purpose.
+#
+# Only ever touches the bundled caster. STREAM_CASTER_TARGETS below are other
+# people's casters whose config this server does not own - a station is
+# provisioned there by hand, as before.
+STREAM_CASTER_AUTO_ENABLE = _bool("STREAM_CASTER_AUTO_ENABLE", False)
+
+# Where the bundled caster's config lives. Only the auto-provisioner writes
+# here; everything else reaches the caster over the network and does not care
+# where its files are. Defaults to the in-repo build (caster/setup.sh) - set it
+# when the caster was installed elsewhere, or to point a second instance on this
+# host at its own caster.
+_caster_etc = os.getenv("STREAM_CASTER_ETC_DIR", "")
+STREAM_CASTER_ETC_DIR = Path(_caster_etc) if _caster_etc else (
+    BASE_DIR / "caster" / "millipede-caster" / "etc")
+
 
 # ---- Additional NTRIP caster targets --------------------------------------
 # The keys above configure one caster - the bundled one, whose credentials

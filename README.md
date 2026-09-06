@@ -258,6 +258,7 @@ and `tests/test_gpstime.py` pins it.
 | `GET` | `/health` | Health check (no auth) |
 | `GET` | `/stream/stations` | Connected stations: GNSS clock, frame counters, resyncs, RTCM3 type histogram |
 | `GET` | `/stream/rover` | Correction downlink counters + auto-discovery candidates |
+| `GET` | `/stream/caster` | Bundled-caster mountpoints (which were auto-provisioned, their positions, the caster's pid) + configured extra targets |
 | `POST`/`DELETE` | `/stream/rover/subscribe` | Manually add/remove a rover on a base's router, live, no restart |
 | `POST` | `/stream/rover/reload` | Re-read `STREAM_ROVER_BASES` from `.env` and apply the diff live |
 | `POST` | `/stream/{station_id}/cli` | Send a CLI command, get the reassembled response |
@@ -398,7 +399,9 @@ curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
 | `STREAM_CASTER_ENABLE` | `false` | Push demuxed RTCM3 out to an NTRIP caster (the reverse direction from `STREAM_NTRIP_*` above) |
 | `STREAM_CASTER_HOST` / `_PORT` | `127.0.0.1` / `2101` | Target caster — defaults to the one bundled in `caster/` |
 | `STREAM_CASTER_PASSWORDS` | *(empty)* | `station:password[,station:password...]` — a station missing here gets no caster push |
-| `STREAM_CASTER_STATIONS` | *(empty)* | Read only by `caster/generate_config.py`, not the server — stations to provision a mountpoint for |
+| `STREAM_CASTER_STATIONS` | *(empty)* | Stations that have a mountpoint — `caster/generate_config.py` provisions from it, the server renders the sourcetable from it |
+| `STREAM_CASTER_AUTO_ENABLE` | `false` | Provision a mountpoint on the **bundled** caster automatically when a station identifies with `role=base` — no `.env` edit, no restart |
+| `STREAM_CASTER_ETC_DIR` | `./caster/millipede-caster/etc` | Where the bundled caster's config lives; only the auto-provisioner writes there |
 | `STREAM_CASTER_TARGETS` | *(empty)* | Further casters to push the same stations to, by name — each configured by `STREAM_CASTER_<NAME>_{HOST,PORT,PASSWORDS,ENABLE}`. Additive to the bundled caster above |
 
 `API_KEY` is shared with the batch server.
@@ -441,6 +444,37 @@ standard NTRIP client.
 `tools/ntrip_relay.py` relays an existing NTRIP mountpoint into one or more casters,
 which is how you exercise a fresh caster with a real correction stream before you have
 a station of your own pushing into it.
+
+**A base provisions its own mountpoint.** With `STREAM_CASTER_AUTO_ENABLE=true`, a
+station identifying with `role=base` gets a mountpoint on the **bundled** caster the
+moment it connects: password generated, `sourcetable.dat`/`source.auth` rewritten,
+caster SIGHUPed, `NtripCasterSink` attached to the *live* session, and
+`STREAM_CASTER_{STATIONS,PASSWORDS,ENABLE}` written back into `.env`. Its sourcetable
+position (Millipede's NEAR routing) fills in from its own first RTCM 1005 instead of
+from the archive. Reconfiguring a device to be a base is then the whole procedure —
+no `.env` edit, no restart, no second `generate_config.py` run.
+
+> **The role byte alone is the gate here, and that is deliberate.** `rover_discovery.py`
+> demands `STREAM_ROVER_AUTO_BASE_STATIONS` on top of the same claim, and the two must
+> not be collapsed into one decision: a trusted base gets pushed **into our own
+> rovers**, which compute a position from whatever arrives, while a mountpoint only
+> makes that station's RTCM3 **retrievable under its own name**, chosen deliberately by
+> a client. Only the weaker consequence runs off a bare wire claim. Off by default.
+>
+> Only ever the bundled caster — `STREAM_CASTER_TARGETS` are other people's casters
+> whose config this server does not own, and stay hand-provisioned.
+>
+> **Both writers of those two files render through `streaming/caster_config.py`.**
+> `caster/generate_config.py` (setup time) and `CasterAutoProvision` (runtime) must
+> stay byte-identical for the same station set, or each run silently drops the other's
+> stations. If you touch the sourcetable format, touch it there.
+>
+> No automatic *removal*: a station that stops being a base keeps its mountpoint.
+> Revoking on a role change would tear down a working publication on every firmware
+> hiccup.
+
+An operator's own caster accounts and mountpoint credentials are still deployment data
+and belong in `.env`, never in the repo.
 
 ## Not implemented
 

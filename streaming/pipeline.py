@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from pyubx2 import UBXReader
 
-from . import config, filetransfer
+from . import config, filetransfer, rtcm
 from .frames import (
     PRIVATE_CLASS,
     ID_IDENT,
@@ -49,9 +49,45 @@ def rtcm3_message_type(raw: bytes) -> int:
     whether the base is actually emitting 1005 + MSM7 + 1230, i.e. whether the
     device's TMODE3/RTCM-MSGOUT configuration took effect.
     """
-    if len(raw) < 5:
-        return -1
-    return (raw[3] << 4) | (raw[4] >> 4)
+    return rtcm.message_type(raw)
+
+
+def _fill_reference_station_id(session: StationSession, raw: bytes) -> bytes:
+    """Stamp the station's own number into DF003 when the receiver left it at 0.
+
+    Old u-blox firmware drops the reference station id configured on it and sends
+    0, which RTCM reads as "no station named" — see streaming/rtcm.py for why that
+    breaks a rover switching between two bases. The session already knows the
+    number, so it is filled in here, once, before the frame fans out: the archive,
+    the caster push and the in-fleet rover router must not disagree about who sent
+    a correction.
+
+    A frame that already carries an id keeps it. That is what makes this safe to
+    leave on: a receiver whose firmware is later updated starts setting DF003
+    itself and this stops touching its frames, with nothing to reconfigure.
+    """
+    current = rtcm.reference_station_id(raw)
+    if current is None or current != 0:
+        return raw
+
+    if session.station_id > rtcm.MAX_REF_ID:
+        if not session.ref_id_fill_reported:
+            session.ref_id_fill_reported = True
+            logger.warning(
+                "station %s: DF003 is 0, but the id does not fit in 12 bits - "
+                "leaving the stream unchanged", session.station_id,
+            )
+        return raw
+
+    patched = rtcm.set_reference_station_id(raw, session.station_id)
+    if not session.ref_id_fill_reported:
+        session.ref_id_fill_reported = True
+        logger.info(
+            "station %s: receiver sends DF003=0, filling in %s (old u-blox firmware)",
+            session.station_id, session.station_id,
+        )
+    session.ref_id_filled = True
+    return patched
 
 
 def ident_station_id(frame: Frame) -> int | None:
@@ -105,9 +141,10 @@ def route_frame(session: StationSession, frame: Frame) -> None:
     if frame.kind == KIND_RTCM3:
         session.rtcm3_frames += 1
         session.note_rtcm3_type(rtcm3_message_type(frame.raw))
+        raw = _fill_reference_station_id(session, frame.raw)
         stamp, sysclk = session.stamp()
         for sink in session.sinks:
-            sink.on_rtcm3(frame.raw, stamp, sysclk)
+            sink.on_rtcm3(raw, stamp, sysclk)
         return
 
     # --- UBX ---

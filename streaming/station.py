@@ -62,6 +62,11 @@ class StationSession:
         # RTCM3 message-number histogram — shows at a glance whether the base is
         # actually emitting 1005 + MSM7 + 1230.
         self.rtcm3_types: dict[int, int] = {}
+        # This station's receiver sends DF003 = 0 and the server fills its id in
+        # (streaming/rtcm.py). Worth surfacing: it means the corrections leaving
+        # here are not byte-identical to what the device sent.
+        self.ref_id_filled = False
+        self.ref_id_fill_reported = False
 
         # Serialises everything written INTO the socket. A file transfer writes
         # raw, unframed bytes that the device consumes by byte count, so a
@@ -268,6 +273,7 @@ class StationSession:
                 "private": self.private_frames,
             },
             "rtcm3_types": dict(sorted(self.rtcm3_types.items())),
+            "ref_id_filled": self.ref_id_filled,
             "resync_events": self.resync_events,
             "garbage_bytes": self.garbage_bytes,
             "cli_pending": not self._done(),

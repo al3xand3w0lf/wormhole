@@ -19,6 +19,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from . import config
+from .caster_provision import CasterArpSink, CasterAutoProvision
 from .frames import ROLE_BASE, ROLE_ROVER
 from .framer import StreamFramer
 from .ntrip import NtripCasterSink
@@ -71,12 +72,22 @@ def _make_sinks(station_id: int) -> list:
                       raw_capture=config.STREAM_RAW_CAPTURE,
                       station_name=_station_names.get(station_id, ""))]
     # Additive, like the rover sinks below: the archive sink is never replaced.
-    # A station missing from STREAM_CASTER_PASSWORDS gets no caster push at all.
-    if config.STREAM_CASTER_ENABLE and station_id in config.STREAM_CASTER_PASSWORDS:
+    # A station missing from STREAM_CASTER_PASSWORDS gets no caster push at all -
+    # unless auto-provisioning has just given it one, which happens in
+    # _provision_caster_mountpoint() before this function is ever called.
+    password = _bundled_caster_password(station_id)
+    if password is not None:
         sinks.append(NtripCasterSink(
             config.STREAM_CASTER_HOST, config.STREAM_CASTER_PORT,
-            str(station_id), config.STREAM_CASTER_PASSWORDS[station_id],
+            str(station_id), password,
         ))
+        # A base's own ARP is what Millipede's NEAR lookup needs in the
+        # sourcetable. Attached to every base with a mountpoint, not only an
+        # auto-provisioned one: it is also what spares a hand-provisioned
+        # station the "re-run generate_config.py once it has archived a 1005"
+        # step, since the position now arrives live.
+        if _caster_provision is not None and _station_roles.get(station_id) == ROLE_BASE:
+            sinks.append(CasterArpSink(station_id, _caster_provision))
     # Any further casters named in STREAM_CASTER_TARGETS. Same station, same
     # RTCM3, one sink per target - a station can go to the bundled caster above
     # and any number of these at once. Each is independent: one caster being
@@ -139,6 +150,10 @@ _station_names: dict[int, str] = {}
 # None unless STREAM_ROVER_AUTO_ENABLE - see rover_discovery.py.
 _discovery: RoverAutoDiscovery | None = None
 
+# None unless STREAM_CASTER_AUTO_ENABLE - see caster_provision.py. Owns the
+# bundled caster's station set for the life of the process.
+_caster_provision: CasterAutoProvision | None = None
+
 # The live, hot-reloadable copy of STREAM_ROVER_BASES (base -> manually pinned
 # rovers). Starts as config.STREAM_ROVER_BASES; POST /stream/rover/reload or
 # SIGHUP replace it via _apply_rover_bases(), which diffs old vs new and
@@ -169,6 +184,64 @@ def _ensure_base_router(station_id: int) -> None:
     _base_routers[station_id] = router
     asyncio.ensure_future(router.run())
     logger.info("rover downlink: auto-registered base %d (role=base, trusted)", station_id)
+
+
+def _bundled_caster_password(station_id: int) -> str | None:
+    """This station's password on the bundled caster, or None for no push.
+
+    STREAM_CASTER_ENABLE gates the hand-configured path. The auto-provisioner
+    being on is its own enable for what it provisions: it does write
+    STREAM_CASTER_ENABLE=true into .env, but that would only take effect on the
+    next start, and not having to wait for one is the entire point.
+    """
+    if config.STREAM_CASTER_ENABLE and station_id in config.STREAM_CASTER_PASSWORDS:
+        return config.STREAM_CASTER_PASSWORDS[station_id]
+    if _caster_provision is not None:
+        return _caster_provision.password_for(station_id)
+    return None
+
+
+def _ensure_caster_sink(session, password: str) -> None:
+    """Attach the bundled caster's sinks to a session whose sinks already exist.
+
+    _make_sinks() runs exactly once per station per process, so a station that
+    becomes a base later in the life of that process - reconfigured on the
+    device, or simply provisioned during this very connect - would otherwise
+    have to wait for a restart. A restart is the manual step this feature
+    exists to remove; it must not reappear here.
+    """
+    host, port, mount = config.STREAM_CASTER_HOST, config.STREAM_CASTER_PORT, str(session.station_id)
+    # Compared on the full triple, not on the type: STREAM_CASTER_TARGETS put
+    # NtripCasterSinks for other casters on this same session.
+    if any(isinstance(s, NtripCasterSink) and (s.host, s.port, s.mountpoint) == (host, port, mount)
+           for s in session.sinks):
+        return
+    session.sinks.append(NtripCasterSink(host, port, mount, password))
+    if _caster_provision is not None and not any(isinstance(s, CasterArpSink) for s in session.sinks):
+        session.sinks.append(CasterArpSink(session.station_id, _caster_provision))
+    logger.info("caster: mountpoint %s attached to the live session", mount)
+
+
+def _provision_caster_mountpoint(station_id: int) -> None:
+    """Give a station that just identified as role=base a caster mountpoint.
+
+    Called from handle_connection() before get_or_create(), for the same reason
+    _ensure_base_router() is: a station connecting for the first time this
+    process then already has its password when _make_sinks() runs. One that
+    already has a session gets the sink appended instead.
+    """
+    if _caster_provision is None:
+        return
+    try:
+        password = _caster_provision.on_base_ident(station_id)
+    except Exception:  # noqa: BLE001 - provisioning must never kill a connection
+        logger.exception("caster: provisioning station %d failed", station_id)
+        return
+    if password is None:
+        return
+    session = registry.get(station_id)
+    if session is not None:
+        _ensure_caster_sink(session, password)
 
 
 # ==========================================================================
@@ -218,6 +291,7 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
                     _station_names[station_id] = ident.name
                     if ident.role == ROLE_BASE:
                         _ensure_base_router(station_id)
+                        _provision_caster_mountpoint(station_id)
 
                     session = registry.get_or_create(station_id)
                     session.bind(writer, peer)
@@ -341,6 +415,35 @@ async def rover_status(_: str = Depends(verify_api_key)):
     return result
 
 
+@admin.get("/stream/caster", tags=["Stream"])
+async def caster_status(_: str = Depends(verify_api_key)):
+    """Mountpoints on the bundled caster, and the extra targets pushed to.
+
+    "auto_provisioned" separates a mountpoint this server created off a role=base
+    IDENT from one that was configured by hand or by caster/setup.sh - the two
+    are otherwise indistinguishable, and only the first will reappear on its own
+    if the files are ever regenerated. "position" is null until that station's
+    own RTCM 1005/1006 ARP has been decoded; Millipede's NEAR entry needs at
+    least one non-null to mean anything.
+
+    "caster_pid" being null means nothing is running this config: pushes will
+    fail their handshake, and a provisioning wrote correct files that nobody
+    reloaded.
+    """
+    result = {
+        "bundled": _caster_provision.status() if _caster_provision is not None
+        else {"enabled": False, "mountpoints": {
+            str(s): {"auto_provisioned": False, "position": None}
+            for s in sorted(config.STREAM_CASTER_PASSWORDS)}},
+        "targets": [
+            {"name": t.name, "host": t.host, "port": t.port,
+             "stations": sorted(t.passwords)}
+            for t in config.STREAM_CASTER_TARGETS
+        ],
+    }
+    return result
+
+
 class RoverSubscribeRequest(BaseModel):
     base: int
     rover: int
@@ -455,7 +558,7 @@ async def send_cli(station_id: int, req: CliRequest, _: str = Depends(verify_api
 # Lifecycle
 # ==========================================================================
 async def run() -> None:
-    global _rover_router, _discovery, _manual_bases
+    global _rover_router, _discovery, _manual_bases, _caster_provision
 
     setup_logging()
     config.STREAM_DIR.mkdir(parents=True, exist_ok=True)
@@ -474,6 +577,26 @@ async def run() -> None:
     for target in config.STREAM_CASTER_TARGETS:
         logger.info("ntrip caster push: %s:%d (%s), stations %s",
                     target.host, target.port, target.name, sorted(target.passwords))
+
+    # --- Automatic mountpoints on the bundled caster (optional) -------------
+    # Only the bundled caster: STREAM_CASTER_TARGETS are casters whose config
+    # this server does not own, so a station is provisioned there by hand as
+    # before. See caster_provision.py.
+    if config.STREAM_CASTER_AUTO_ENABLE:
+        _caster_provision = CasterAutoProvision(
+            config.BASE_DIR / ".env",
+            config.STREAM_CASTER_STATIONS,
+            config.STREAM_CASTER_PASSWORDS,
+            etc_dir=config.STREAM_CASTER_ETC_DIR,
+        )
+        logger.info("caster auto-provisioning: on, %s, mountpoints %s",
+                    config.STREAM_CASTER_ETC_DIR, sorted(_caster_provision.stations))
+        if not (config.STREAM_CASTER_ETC_DIR / "caster.yaml").exists():
+            logger.warning(
+                "caster auto-provisioning is on but %s does not exist - run "
+                "caster/setup.sh, or point STREAM_CASTER_ETC_DIR at the caster "
+                "that should actually receive these pushes",
+                config.STREAM_CASTER_ETC_DIR / "caster.yaml")
 
     # --- RTK rover correction downlink (optional) --------------------------
     # Off unless stations are named AND a source is configured. A half-configured

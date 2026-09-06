@@ -101,8 +101,17 @@ def rawx(week: int, tow: float, leap_s: int = GPS_LEAP_S) -> bytes:
     return build_ubx(0x02, 0x15, payload)
 
 
-def rtcm3(msg_type: int = 1005, size: int = 20) -> bytes:
-    payload = struct.pack(">H", (msg_type << 4) & 0xFFF0) + bytes(
+def rtcm3(msg_type: int = 1005, size: int = 20, ref_id: int = 0) -> bytes:
+    """A frame with a real DF002/DF003 header and a random body.
+
+    DF003 defaults to 0 - what a receiver on old u-blox firmware puts on the wire
+    when it ignores the reference station id configured on it, and the case
+    streaming/rtcm.py fills in. Pass a number to play a receiver that names
+    itself. (Before this took an argument the id was part of the random tail,
+    i.e. a different station on every frame - which no receiver ever sends.)
+    """
+    header = (msg_type << 12) | (ref_id & 0xFFF)
+    payload = header.to_bytes(3, "big") + bytes(
         random.getrandbits(8) for _ in range(size)
     )
     body = bytes([0xD3, (len(payload) >> 8) & 0x03, len(payload) & 0xFF]) + payload
