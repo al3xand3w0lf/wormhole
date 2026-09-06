@@ -153,3 +153,39 @@ async def test_connection_without_ident_is_dropped(tmp_path, monkeypatch):
     writer.close()
     srv.close()
     await srv.wait_closed()
+
+
+
+@pytest.mark.asyncio
+async def test_station_name_from_ident_labels_the_archive(tmp_path, monkeypatch):
+    """The wiring this feature actually depends on: handle_connection() must
+    record ident.name BEFORE registry.get_or_create(), because _make_sinks()
+    runs exactly once per station per process and only gets one chance to label
+    the directory. Deliberately uses the real server.registry / _make_sinks
+    rather than a stub - a test that injects its own sink factory would pass
+    even if that ordering were wrong."""
+    monkeypatch.setattr(config, "STREAM_DIR", tmp_path)
+    monkeypatch.setattr(server, "registry", StationRegistry(server._make_sinks))
+    monkeypatch.setattr(server, "_station_names", {})
+    monkeypatch.setattr(server, "_station_roles", {})
+
+    srv = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    port = srv.sockets[0].getsockname()[1]
+
+    _, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(ident(2001, name="A001") + rawx(WEEK, TOW))
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if (tmp_path / "A001_2001" / "ubx").exists():
+            break
+
+    srv.close()
+    await srv.wait_closed()
+
+    assert (tmp_path / "A001_2001" / "ubx").is_dir()
+    assert not (tmp_path / "2001").exists()
+    assert server._station_names[2001] == "A001"

@@ -18,6 +18,8 @@ Wire format (little-endian, packed):
     0x03  IDENT                dev->srv   <IB3x  stationId, role (0=unset 1=base 2=rover
                                                   3=logger 4=stream 5=rover_ntrip)
                                                   + 3 reserved
+                                                  + [name_len u8][station_name] (FW 1.69.x+,
+                                                  RAW text, <=31 B, sanitised by stationdir.py)
     0x04  HEARTBEAT            dev->srv   (empty)
     0x05  CLI_RESPONSE         dev->srv   [more_flag u8][text]  0=more, 1=last
     0x06  CMD_REQUEST          srv->dev   [tok_len u8][token][cmd]
@@ -151,6 +153,11 @@ class Ident:
     # sends 0 explicitly — the two are indistinguishable on the wire and treated
     # identically: no auto-registration as a correction source either way.
     role: int = ROLE_UNSET
+    # The device's own station_name (CONFIG.TXT), e.g. "A001" — the identity the
+    # batch-mode file names carried. RAW as sent: sanitising for the file system
+    # is stationdir.sanitize()'s job, not the decoder's. "" for firmware that
+    # predates the field, which keeps the bare-id archive layout.
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -279,7 +286,17 @@ def decode_private(raw: bytes):
         # Byte 4 (role) is new; a shorter payload is old firmware, not malformed
         # — fall back to ROLE_UNSET rather than rejecting the whole IDENT.
         role = payload[4] if len(payload) >= 5 else ROLE_UNSET
-        return Ident(station_id, role)
+        # Byte 8 onwards is the length-prefixed station name (FW 1.69.x+). Same
+        # rule as the role byte before it: a payload that stops short is older
+        # firmware, not a malformed frame.
+        name = ""
+        if len(payload) >= 9:
+            name_len = payload[8]
+            # Trust the length only as far as the payload actually goes — a
+            # truncated name is worth having, a struct.error that kills the
+            # connection's frame loop is not.
+            name = payload[9:9 + name_len].decode("utf-8", errors="replace").strip()
+        return Ident(station_id, role, name)
 
     if msg_id == ID_NMEA_GGA:
         if not payload:

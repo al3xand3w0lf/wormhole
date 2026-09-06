@@ -67,7 +67,9 @@ def sweep_stale_raw() -> None:
 
 
 def _make_sinks(station_id: int) -> list:
-    sinks = [FileSink(config.STREAM_DIR, station_id, raw_capture=config.STREAM_RAW_CAPTURE)]
+    sinks = [FileSink(config.STREAM_DIR, station_id,
+                      raw_capture=config.STREAM_RAW_CAPTURE,
+                      station_name=_station_names.get(station_id, ""))]
     # Additive, like the rover sinks below: the archive sink is never replaced.
     # A station missing from STREAM_CASTER_PASSWORDS gets no caster push at all.
     if config.STREAM_CASTER_ENABLE and station_id in config.STREAM_CASTER_PASSWORDS:
@@ -123,6 +125,16 @@ _rover_router: RoverRouter | None = None
 # _make_sinks() on a station's first-ever identification this process), so
 # _make_sinks() above can see the role the very first time it runs.
 _station_roles: dict[int, int] = {}
+
+# station id -> station_name from its most recent IDENT, raw as the device sent
+# it (""  for firmware that predates the field). Populated alongside
+# _station_roles and for the same reason: _make_sinks() runs exactly once per
+# station per process and must already know the name to label the archive.
+#
+# A station that renames itself mid-process keeps the label its sinks were built
+# with until the server restarts. That is deliberate - swapping the output
+# directory under a live connection would split one session across two paths.
+_station_names: dict[int, str] = {}
 
 # None unless STREAM_ROVER_AUTO_ENABLE - see rover_discovery.py.
 _discovery: RoverAutoDiscovery | None = None
@@ -203,13 +215,14 @@ async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.Stream
                     # process) reads _station_roles and _base_routers to decide
                     # what to attach, and only gets one chance to do so.
                     _station_roles[station_id] = ident.role
+                    _station_names[station_id] = ident.name
                     if ident.role == ROLE_BASE:
                         _ensure_base_router(station_id)
 
                     session = registry.get_or_create(station_id)
                     session.bind(writer, peer)
-                    logger.info("station %s identified from %s (role=%d)",
-                                station_id, peer, ident.role)
+                    logger.info("station %s identified from %s (role=%d, name=%r)",
+                                station_id, peer, ident.role, ident.name)
                     if _discovery is not None:
                         _discovery.on_ident(station_id, ident.role)
 

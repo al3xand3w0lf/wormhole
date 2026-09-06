@@ -24,6 +24,7 @@ from pathlib import Path
 
 from downloads import resolve_download, sanitize_filename
 
+from . import stationdir
 from .frames import FileUpBegin, FileUpData, encode_file_begin
 
 logger = logging.getLogger("streaming")
@@ -147,7 +148,11 @@ class UploadReceiver:
     """Reassembles one incoming file for a station."""
 
     def __init__(self, root: Path, station_id: int):
-        self._dir = root / str(station_id) / "uploads"
+        # resolve() rather than str(station_id): the station's archive may be
+        # under its label ("A001_2001"), and an upload belongs next to it, not
+        # in a second bare-id directory. FileSink has already adopted the
+        # directory by the time any upload arrives.
+        self._dir = stationdir.resolve(root, station_id) / "uploads"
         self.station_id = station_id
         self._fh = None
         self._part: Path | None = None

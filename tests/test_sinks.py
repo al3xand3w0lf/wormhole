@@ -242,3 +242,33 @@ def test_a_sink_that_owns_no_file_survives_a_gga(tmp_path):
     sink = RoverPositionSink(station_id=2001, discovery=object())
     sink.on_nmea("$GNGGA,140000.00,,,,,0,00,99.99,,,,,,*56", None, False)
     Sink().on_nmea("$GNGGA,140000.00,,,,,0,00,99.99,,,,,,*56", None, False)
+
+
+
+def test_named_station_labels_both_the_directory_and_the_file_names(tmp_path):
+    """The point of the name on the wire: a bare file name must say which
+    project site it belongs to. "2001_ubx_*.ubx" cannot; "A001_2001_ubx_*.ubx"
+    can, and it still carries the id that everything runtime-side is keyed on."""
+    session = StationSession(2001, [FileSink(tmp_path, 2001, station_name="A001")])
+    framer = StreamFramer()
+
+    feed(session, rawx(WEEK, TOW_H13), framer)
+    session.close()
+
+    ubx_dir = tmp_path / "A001_2001" / "ubx"
+    assert ubx_dir.is_dir()
+    assert not (tmp_path / "2001").exists()
+    assert all(p.name.startswith("A001_2001_ubx_") for p in ubx_dir.iterdir())
+
+
+def test_unnamed_station_keeps_the_bare_id_layout(tmp_path):
+    """Pre-1.69 firmware sends no name; its archive path must be byte-identical
+    to what it was before this feature."""
+    session = StationSession(2001, [FileSink(tmp_path, 2001)])
+    framer = StreamFramer()
+
+    feed(session, rawx(WEEK, TOW_H13), framer)
+    session.close()
+
+    assert (tmp_path / "2001" / "ubx").is_dir()
+    assert all(p.name.startswith("2001_ubx_") for p in (tmp_path / "2001" / "ubx").iterdir())

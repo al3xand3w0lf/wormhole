@@ -71,10 +71,17 @@ def rawx(week: int, rcv_tow: float, leap_s: int = 18) -> bytes:
     return ubx(RXM_CLASS, RXM_RAWX_ID, payload)
 
 
-def ident(station_id: int, role: int = 0) -> bytes:
-    # Matches the firmware layout: <I station_id><B role><3x reserved>. role
-    # defaults to 0 (ROLE_UNSET) so every pre-existing caller stays unchanged.
-    return ubx(PRIVATE_CLASS, ID_IDENT, struct.pack("<IB3x", station_id, role))
+def ident(station_id: int, role: int = 0, name: str = "") -> bytes:
+    # Matches the firmware layout:
+    #   <I station_id><B role><3x reserved>[<B name_len><name>]
+    # role defaults to 0 (ROLE_UNSET) and the name tail is omitted entirely when
+    # empty, so every pre-existing caller keeps producing the exact 8-byte
+    # payload that firmware before 1.69.x sends.
+    payload = struct.pack("<IB3x", station_id, role)
+    if name:
+        raw = name.encode("utf-8")
+        payload += bytes([len(raw)]) + raw
+    return ubx(PRIVATE_CLASS, ID_IDENT, payload)
 
 
 def heartbeat() -> bytes:

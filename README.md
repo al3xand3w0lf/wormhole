@@ -210,13 +210,25 @@ pytest                        # 238 tests
 ## Output layout
 
 ```
-data/incoming_stream/<stationId>/
+data/incoming_stream/<station>/
     ubx/       <station>_ubx_YYYYMMDD_HH.ubx        hourly, GNSS-time hour
     rtcm3/     <station>_rtcm3_YYYYMMDD_HH.rtcm3    hourly
     sensors/   <station>_<stream>_YYYYMMDD.csv      daily
     raw/       <station>_raw_YYYYMMDD_HH.bin        byte-exact capture (replay.py)
     cli/       <station>_cli_YYYYMMDD.log
 ```
+
+`<station>` is the station's **label**. A device that sends its own name in IDENT
+(`station_name`, e.g. `A001`) is archived as `A001_2001` — name *and* id, in the
+directory and in every file name inside it, so a bare file name says which site it
+belongs to. The id stays in the label because the name is free text, editable in the
+field and not guaranteed unique, while everything runtime-side (caster mountpoint,
+rover subscription, admin API) is keyed on the id. A device that sends no name is
+archived as plain `2001`, exactly as before. See `streaming/stationdir.py`.
+
+When a station that already has a bare-id directory starts sending a name, that
+directory is renamed onto the label once, so its history and its new data stay in one
+place. Files already written keep their old names.
 
 CSV columns: `rtc_unix, gps_iso, utc_iso, leap_s, <values…>`
 

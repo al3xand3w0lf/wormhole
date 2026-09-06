@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from streaming import stationdir
 from streaming.framer import StreamFramer
 from streaming.pipeline import ident_station_id, is_ident, route_frame
 from streaming.sinks import FileSink
@@ -100,7 +101,7 @@ def main() -> int:
         f"private={session.private_frames} "
         f"resyncs={framer.resync_events} garbage={framer.garbage_bytes} B"
     )
-    print(f"output: {out_root / str(session.station_id)}")
+    print(f"output: {stationdir.resolve(out_root, session.station_id)}")
     return 0
 
 

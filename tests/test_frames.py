@@ -187,3 +187,36 @@ class TestCmdRequest:
     def test_oversized_token_rejected(self):
         with pytest.raises(ValueError):
             encode_cmd_request("whoami", "x" * 256)
+
+
+
+def test_ident_carries_the_station_name():
+    """FW 1.69.x appends [name_len][station_name] after the reserved bytes. The
+    name is what the batch-mode file names were built from ("A001"), and it is
+    the only way a stream consumer can tell which project site station 2001 is.
+    """
+    msg = decode_private(ident(2001, ROLE_BASE, "A001"))
+    assert msg == Ident(2001, ROLE_BASE, "A001")
+
+
+def test_ident_name_is_decoded_raw():
+    """The device sends station_name verbatim - spaces and non-ASCII included.
+    Making it safe for a file system is stationdir.sanitize()'s job; a decoder
+    that pre-mangled it would destroy the station's actual name."""
+    assert decode_private(ident(2001, ROLE_BASE, "Zurich Nord")).name == "Zurich Nord"
+
+
+def test_ident_without_a_name_is_older_firmware():
+    """Same tolerance rule as the role byte: a payload that stops at 8 bytes is
+    pre-1.69 firmware, not a malformed frame. Its archive keeps the bare-id
+    layout."""
+    assert decode_private(ident(2001, ROLE_BASE)).name == ""
+
+
+def test_ident_name_length_longer_than_the_payload_is_truncated_not_fatal():
+    """A name_len that overruns the payload must not raise: an exception here
+    would kill the connection's whole frame loop over one bad IDENT byte. Take
+    what is actually there."""
+    raw = build_ubx(PRIVATE_CLASS, ID_IDENT,
+                    struct.pack("<IB3xB", 2001, ROLE_BASE, 99) + b"A001")
+    assert decode_private(raw) == Ident(2001, ROLE_BASE, "A001")

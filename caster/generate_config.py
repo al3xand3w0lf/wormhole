@@ -29,6 +29,8 @@ from dotenv import dotenv_values, set_key
 
 CASTER_DIR = Path(__file__).resolve().parent
 REPO_DIR = CASTER_DIR.parent
+sys.path.insert(0, str(REPO_DIR))
+from streaming import stationdir  # noqa: E402
 ENV_FILE = REPO_DIR / ".env"
 BUILD_DIR = CASTER_DIR / "millipede-caster"
 ETC_DIR = BUILD_DIR / "etc"
@@ -88,10 +90,13 @@ def _decode_station_position(station: int, stream_dir: Path) -> tuple[float, flo
     BaseArpSink._decode_arp() / tests/analyze_baseline.py's decode_base_arp(),
     run here over the archive instead of a live socket.
     """
-    rtcm_dir = stream_dir / str(station) / "rtcm3"
+    # The archive directory may be labelled with the station name
+    # ("A001_2001"), so ask stationdir instead of assuming the bare id - and
+    # glob on the suffix, since the file names carry the same label.
+    rtcm_dir = stationdir.resolve(stream_dir, station) / "rtcm3"
     if not rtcm_dir.is_dir():
         return None
-    files = sorted(rtcm_dir.glob(f"{station}_rtcm3_*.rtcm3"))
+    files = sorted(rtcm_dir.glob("*_rtcm3_*.rtcm3"))
     if not files:
         return None
 

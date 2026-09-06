@@ -4,9 +4,11 @@ A `Sink` receives demuxed data. Today only file-based sinks are registered; the
 NTRIP caster (RTCM3 -> caster) and a live-UBX fan-out can later be added as extra
 sinks without touching the framer or the station logic.
 
-File layout (per station, under STREAM_DIR):
+File layout (per station, under STREAM_DIR). `<station>` is the station's
+*label*: "A001_2001" when its IDENT carried a station name, plain "2001" when it
+did not (pre-1.69 firmware). See stationdir.py for why the id stays in it.
 
-    <stationId>/ubx/     <station>_ubx_YYYYMMDD_HH.ubx      hourly, GPS-time hour
+    <station>/  ubx/     <station>_ubx_YYYYMMDD_HH.ubx      hourly, GPS-time hour
                 rtcm3/   <station>_rtcm3_YYYYMMDD_HH.rtcm3  hourly
                 nmea/    <station>_gga_YYYYMMDD_HH.nmea      hourly, receiver NMEA-GGA
                 sensors/ <station>_<stream>_YYYYMMDD.csv    daily, append
@@ -26,6 +28,7 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import stationdir
 from .frames import SENSOR_SPECS, SensorReading
 from .gpstime import GnssClock, rtc_unix_to_datetime
 
@@ -129,9 +132,14 @@ def day_key(stamp: datetime, sysclk: bool) -> str:
 class FileSink(Sink):
     """Writes .ubx / .rtcm3 / raw .bin / sensor CSVs / CLI log for one station."""
 
-    def __init__(self, root: Path, station_id: int, raw_capture: bool = True):
-        self.station = str(station_id)
-        base = root / self.station
+    def __init__(self, root: Path, station_id: int, raw_capture: bool = True,
+                 station_name: str = ""):
+        # One label for the directory AND every file name in it, so that a
+        # station's name is readable from a bare file name alone - which is the
+        # whole point: post-processing that only ever sees "2001_ubx_*.ubx"
+        # cannot tell that this is site A001.
+        base = stationdir.adopt(root, station_id, station_name)
+        self.station = base.name
         self._raw_capture = raw_capture
 
         self._ubx = _BinaryStream(base / "ubx", "{station}_ubx_{key}.ubx")
