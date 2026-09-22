@@ -52,6 +52,13 @@ git clone git@github.com:<owner>/<repo>.git /opt/wormhole
 cd /opt/wormhole
 ```
 
+For example, cloning your own fork of this template:
+
+```bash
+git clone git@github.com:alice/wormhole.git /opt/wormhole
+cd /opt/wormhole
+```
+
 `/opt/wormhole` is used throughout this guide; any directory works, as long as the
 systemd units in step 7 name the same one.
 
