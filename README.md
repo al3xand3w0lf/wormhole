@@ -507,8 +507,8 @@ wormhole/
 ├── requirements-dev.txt             # + pytest
 ├── .env.example                     # Configuration template (both servers)
 ├── generate-ssl.sh                  # SSL certificate generator
-├── wormhole.service                 # systemd service (batch)
-├── wormhole-streaming.service       # systemd service (streaming)
+├── wormhole.service                 # systemd unit template (batch), see server-deployment.md step 7
+├── wormhole-streaming.service       # systemd unit template (streaming), see server-deployment.md step 7
 ├── server-deployment.md             # Server setup guide
 ├── test_upload.py                   # Batch: upload test client
 ├── test_download.py                 # Batch: download test client

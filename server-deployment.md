@@ -1,197 +1,420 @@
 # Wormhole Groundstation — Setup Guide
 
-Builds a complete groundstation from an empty machine: the batch file server, the
-streaming receiver, and the NTRIP caster bundled in `caster/`. Debian/Ubuntu.
+Builds a complete groundstation instance from an empty Debian/Ubuntu machine: the
+batch file server, the streaming receiver, and the NTRIP caster bundled in
+`caster/`. The same steps set up a second, third, … instance on a host that already
+runs one — every name and port below is derived from one number, so instances never
+collide.
 
-Every step below was executed end to end on a fresh clone before this guide was
-written; the verification commands are the ones that were actually run, not
-illustrations. Follow it in order — each step ends with a check, so a mistake is
-caught where it was made instead of three steps later.
+Follow it top to bottom. Every step ends with a check; do not go on while a check
+fails — the mistake is cheapest to fix where it was made.
+
+## Before you start: three rules for reading this guide
+
+**1. Every code block says where it runs.**
+
+| Marker | Where |
+|---|---|
+| 🖥 **server** | In an SSH session **on the server** (as root, or with `sudo`) |
+| 💻 **your PC** | In a terminal **on your own computer**, *not* inside the SSH session |
+
+Running a 💻 command on the server does not fail loudly — it just does something
+useless, and can even block a port the server needs (see *Troubleshooting*).
+
+**2. There are no `<placeholders>` to type over.** Every block uses the shell
+variables you set once in step 0. If you open a new SSH session, **run the step-0
+block again first** — shell variables do not survive a logout.
+
+If you ever copy a command that still contains `<something>` literally (from an
+older guide, a chat, a README), the shell stops with
+`syntax error near unexpected token 'newline'` — `<` and `>` are redirections to
+bash. Replace the whole `<…>`, brackets included.
+
+**3. Never copy `.env` from another instance.** It carries that instance's secrets
+and ports. Start from `.env.example` (step 4).
 
 ## What you end up with
 
-Three independent processes. They share the repo, the venv, the `.env` and the
-`data/` tree, but they run as separate services and do not import each other — one
+Three independent processes per instance. They share the instance directory, the
+venv, the `.env` and the `data/` tree, but run as separate systemd services — one
 crashing or being restarted does not touch the others.
 
-| Process | Default port | Role |
-|---|---|---|
-| `server.py` | 8000 (HTTP) | Batch mode: devices upload finished files |
-| `streaming_server.py` | 9000 (TCP) | Streaming mode: live byte stream, one socket per station |
-| ↳ its admin API | 9001 (HTTP) | Status + remote CLI — **loopback only**, never public |
-| `caster/` (Millipede) | 2101 (TCP) | NTRIP caster: rovers pull the corrections a base pushed in |
+| Process | Port | Reachable from | Role |
+|---|---|---|---|
+| `streaming_server.py` | **N** | Internet (devices) | Streaming mode: live byte stream, one socket per station |
+| ↳ its admin API | **N+1** | **loopback only** | Status + remote CLI — reached through an SSH tunnel, never opened |
+| Millipede caster | **N+2** | Internet (rovers), optional | NTRIP caster: rovers pull the corrections a base pushed in |
+| `server.py` | **N+3** | Internet (devices) | Batch mode: devices upload finished files |
 
-A rover can take corrections either **directly over the streaming socket** (Direct
-Streaming Mode) or **as a standard NTRIP client** from the caster. The caster is
-optional — skip step 6 and everything else still works.
+**N** is the instance number and its streaming port, e.g. `11000`. The directory,
+the service names and all four ports follow from it:
 
-Pick the ports as one contiguous block per instance, named after the streaming
-port, and keep the batch port next to it rather than in an unrelated range. See
-"Several instances on one host" below.
+| Instance | Directory | Services | Stream | Admin | Caster | Batch |
+|---|---|---|---|---|---|---|
+| 9000 | `/opt/wormhole_9000` | `wormhole-9000-{stream,batch,caster}` | 9000 | 9001 | 9002 | 9003 |
+| 10000 | `/opt/wormhole_10000` | `wormhole-10000-…` | 10000 | 10001 | 10002 | 10003 |
+| 11000 | `/opt/wormhole_11000` | `wormhole-11000-…` | 11000 | 11001 | 11002 | 11003 |
+
+Pick an N whose four ports are all free (step 0 checks that). Use steps of 1000.
 
 ---
 
+## 0. Set the instance variables
+
+🖥 **server** — adjust the first two lines, paste the whole block:
+
+```bash
+N=11000                              # instance number = streaming port
+SERVER_IP=203.0.113.10            # this server's public address (for the device config)
+
+DIR=/opt/wormhole_$N
+ADMIN=$((N+1)); CASTER=$((N+2)); BATCH=$((N+3))
+echo "instance $N in $DIR — stream $N, admin $ADMIN, caster $CASTER, batch $BATCH"
+```
+
+✅ **Check** — the ports must be free and the directory must not exist yet:
+
+```bash
+ss -ltn | grep -E ":($N|$ADMIN|$CASTER|$BATCH) " && echo "PORT IN USE - pick another N" || echo "ports free"
+test -e "$DIR" && echo "$DIR EXISTS - pick another N" || echo "directory free"
+```
+
+Both lines must say *free*.
+
 ## 1. Packages
 
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git curl
-```
-
-Only if you want the bundled caster (step 6) — `caster/setup.sh` installs these
-itself on first run, so you can skip this line and let it ask for sudo once:
+🖥 **server** (once per host — skip on a host that already runs an instance):
 
 ```bash
-sudo apt install -y pkg-config libcyaml-dev libevent-dev libjson-c-dev libssl-dev
+apt update
+apt install -y python3 python3-venv python3-pip git curl \
+               pkg-config libcyaml-dev libevent-dev libjson-c-dev libssl-dev
 ```
+
+The second line is only for the bundled caster (step 6).
 
 ## 2. Clone
 
-```bash
-git clone git@github.com:<owner>/<repo>.git /opt/wormhole
-cd /opt/wormhole
-```
-
-For example, cloning your own fork of this template:
+🖥 **server** — over HTTPS, so no GitHub key is needed on the server:
 
 ```bash
-git clone git@github.com:alice/wormhole.git /opt/wormhole
-cd /opt/wormhole
+git clone https://github.com/al3xand3w0lf/wormhole.git "$DIR"
+cd "$DIR"
 ```
 
-`/opt/wormhole` is used throughout this guide; any directory works, as long as the
-systemd units in step 7 name the same one.
+Clone it — do not download and unpack a ZIP. A ZIP has no `.git`, so the
+*Updating* section (`git pull`) cannot work, and it loses the executable bits of the
+scripts.
+
+✅ **Check:** `git -C "$DIR" log --oneline -1` prints a commit.
 
 ## 3. Python environment
 
+🖥 **server**
+
 ```bash
+cd "$DIR"
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-```
-
-`requirements-dev.txt` only adds pytest — leave it out on a machine that will never
-run the suite, but step 5 is the cheapest verification you get, so install it.
-
-## 4. Configuration
-
-Config is `.env` only. Copy the example and edit it — it documents every key.
-
-```bash
-cp .env.example .env
-chmod 600 .env          # it will hold the API key and the caster passwords
-```
-
-The minimum that must change:
-
-```ini
-API_KEY=<long random string>      # X-API-Key for both HTTP APIs
-PORT=8000                         # batch file server
-STREAM_PORT=9000                  # streaming data plane (must match the device)
-STREAM_ADMIN_PORT=9001            # admin API
-STREAM_CLI_SECRET=<random token>  # MUST match streaming_cli_secret in the device's CONFIG.TXT
-```
-
-Generate the secrets rather than inventing them:
-
-```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(24))"
-```
-
-Leave `STREAM_ADMIN_HOST` at its `127.0.0.1` default. The admin API can reboot a
-device and push firmware; the shared secret authenticates it but the stream has no
-TLS, so the token does not conceal anything. Reach it through an SSH tunnel instead
-of widening the bind address:
-
-```bash
-ssh -L 9001:localhost:9001 user@<server>
-```
-
-## 5. Verify before wiring anything up
-
-Run the test suite — it needs no hardware, no network and no configuration:
-
-```bash
 ./venv/bin/python -m pytest -q
 ```
 
-Then a live smoke test. `fake_device.py` connects **as** a station and would evict a
-real device holding the same id, which is why it refuses to start without the
-opt-in variable:
+The test suite needs no hardware, no network and no configuration.
+
+✅ **Check:** the last line says `… passed` and no `failed`.
+
+## 4. Configuration (`.env`)
+
+🖥 **server** — creates `.env`, sets the ports from N and **generates and writes
+both secrets** in one go. Nothing to type by hand:
 
 ```bash
-./venv/bin/python streaming_server.py &
+cd "$DIR"
+cp .env.example .env
+chmod 600 .env
+
+# set KEY=VALUE, whether the key is present, commented out (# KEY=) or missing
+setenv() { if grep -qE "^#? ?$1=" .env; then sed -i -E "s|^#? ?$1=.*|$1=$2|" .env; else echo "$1=$2" >> .env; fi; }
+gen()    { python3 -c "import secrets; print(secrets.token_urlsafe(24))"; }
+
+setenv API_KEY            "$(gen)"
+setenv STREAM_CLI_SECRET  "$(gen)"
+setenv PORT               $BATCH
+setenv STREAM_PORT        $N
+setenv STREAM_ADMIN_HOST  127.0.0.1
+setenv STREAM_ADMIN_PORT  $ADMIN
+setenv STREAM_CASTER_PORT $CASTER
+setenv STREAM_CASTER_STATIONS 1001        # the station id(s) of this instance, comma-separated
+```
+
+✅ **Check** — prints the active settings with the secrets masked:
+
+```bash
+grep -vE '^\s*(#|$)' .env | sed -E 's/^((API_KEY|STREAM_CLI_SECRET|STREAM_CASTER_PASSWORDS)=).+/\1***/'
+```
+
+You must see `API_KEY=***`, `STREAM_CLI_SECRET=***` and the four ports of this
+instance. `API_KEY` must **not** be `changeme`.
+
+What the two secrets are for:
+
+| Key | Used by | Must match |
+|---|---|---|
+| `API_KEY` | `X-API-Key` header of both HTTP APIs (batch + admin) | Your scripts / curl calls; the device's batch-upload key if it uploads in batch mode |
+| `STREAM_CLI_SECRET` | Authenticates remote CLI commands to a device | `streaming_cli_secret` in the device's `CONFIG.TXT` (step 9) |
+
+You read them back later with `grep '^API_KEY=' "$DIR/.env"` — no need to write
+them down anywhere else.
+
+The admin API (port N+1) stays on `127.0.0.1`. It can reboot a device and push
+firmware; do not widen the bind address. You reach it through an SSH tunnel from
+your PC (step 10).
+
+## 5. Smoke test by hand
+
+🖥 **server** — start the streaming server in the foreground of this terminal:
+
+```bash
+cd "$DIR"
+./venv/bin/python streaming_server.py
+```
+
+🖥 **server, a second SSH session** (re-run step 0 there first!) — a fake station
+connects for 60 s:
+
+```bash
+cd "$DIR"
 FAKE_DEVICE_ENABLE=1 ./venv/bin/python fake_device.py \
-    --host 127.0.0.1 --port 9000 --station 1001 --role base \
+    --host 127.0.0.1 --port $N --station 1001 --role base \
     --secret "$(grep '^STREAM_CLI_SECRET=' .env | cut -d= -f2)" --duration 60 &
-
-curl -s -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
+sleep 15
+curl -s -H "X-API-Key: $(grep '^API_KEY=' .env | cut -d= -f2)" http://127.0.0.1:$ADMIN/stream/stations
 ```
 
-Expected: one station, `"connected": true`, frame counters rising, and
-**`resync_events` and `garbage_bytes` both 0**. Files appear under
-`data/incoming_stream/1001/{ubx,rtcm3,sensors,raw}/`.
+✅ **Check:** one station, `"connected": true`, frame counters above 0, and
+**`resync_events` and `garbage_bytes` both 0**.
 
-The batch server, in a second terminal:
+`fake_device.py` connects **as** station 1001 and would evict a real device holding
+that id — which is why it refuses to start without `FAKE_DEVICE_ENABLE=1`. Only run
+it before a real device points at this instance.
+
+Stop the server in the first terminal (Ctrl+C) and clean up:
 
 ```bash
-./venv/bin/python server.py --no-ssl &
-curl -s http://127.0.0.1:8000/health
-echo test | curl -s -X POST "http://127.0.0.1:8000/modem/upload?device_id=selftest&filename=t.bin" \
-     -H "X-API-Key: <key>" -H "Content-Type: application/octet-stream" --data-binary @-
-curl -s http://127.0.0.1:8000/uploads -H "X-API-Key: <key>"
+rm -rf "$DIR/data/incoming_stream/1001"
 ```
-
-Stop both again before step 7 puts them under systemd, and delete the test upload
-and `data/incoming_stream/1001/`.
 
 ## 6. NTRIP caster (optional)
 
-`caster/` bundles a real caster (Millipede), so a fresh install has somewhere to
-push to without an account on someone else's caster first. Set the two keys it
-reads, in `.env`:
+Skip this step if no rover will pull corrections from this instance — and then also
+skip the caster unit in step 7 and its firewall line in step 8.
 
-```ini
-STREAM_CASTER_PORT=2101
-STREAM_CASTER_STATIONS=1001     # one mountpoint per station id, comma-separated
-```
-
-Then:
+🖥 **server** — build Millipede inside the instance and generate its config:
 
 ```bash
-bash caster/setup.sh
+cd "$DIR/caster"
+git clone https://github.com/pbeyssac/millipede-caster.git millipede-caster
+make -C millipede-caster/caster
+"$DIR/venv/bin/python3" generate_config.py
 ```
 
-The script clones and builds Millipede in place under
-`caster/millipede-caster/` (unprivileged, nothing is installed system-wide),
-generates `caster.yaml` / `sourcetable.dat` / `source.auth`, and writes a freshly
-generated password per station **back into `.env`** as `STREAM_CASTER_PASSWORDS`,
-setting `STREAM_CASTER_ENABLE=true`. The caster and the server therefore always
-agree on the credential and there is nothing to copy by hand. Re-running it to add
-a station never regenerates an existing station's password.
+`generate_config.py` writes `caster.yaml`, `sourcetable.dat` and `source.auth`
+under `caster/millipede-caster/etc/`, generates one push password per station and
+writes it **back into `.env`** as `STREAM_CASTER_PASSWORDS`, together with
+`STREAM_CASTER_ENABLE=true`. Caster and streaming server therefore always agree on
+the credential. Re-running it (e.g. after adding a station to
+`STREAM_CASTER_STATIONS`) never changes an existing station's password.
 
-It also writes a **user** systemd unit, `~/.config/systemd/user/millipede-caster.service`:
+✅ **Check:**
 
 ```bash
-systemctl --user enable --now millipede-caster
-systemctl --user status millipede-caster
-sudo loginctl enable-linger "$USER"   # so it survives logout/reboot without a session
+ls -l "$DIR/caster/millipede-caster/caster/caster"
+grep -E '^STREAM_CASTER_(ENABLE|STATIONS|PORT)=' "$DIR/.env"
 ```
 
-Restart the streaming server afterwards — it reads `STREAM_CASTER_ENABLE` at
-startup and logs the target on the way up:
+> Do **not** use `caster/setup.sh` on a server with several instances. It does the
+> same build, but installs a *user* unit that is always called
+> `millipede-caster.service` — a second instance silently overwrites the first
+> one's. Step 7 uses a per-instance system unit instead. `setup.sh` is meant for a
+> single instance on a desktop/Pi.
 
-```
-ntrip caster push: 127.0.0.1:2101, stations [1001]
-```
+The caster's own behaviour (idle mountpoints answer 404, anonymous pull, the
+"Mount Point Taken" trap) is described under *Verifying the caster* below and in
+`caster/README.md`.
 
-### Verifying the caster
+## 7. systemd services
 
-With a station pushing (the real device, or `fake_device.py` from step 5):
+🖥 **server** — writes up to three units named after the instance. Paste the whole
+block; the variables from step 0 are filled in:
 
 ```bash
-curl -s --max-time 5 http://127.0.0.1:2101/            # sourcetable
-curl -s --max-time 10 -H "Ntrip-Version: Ntrip/2.0" http://127.0.0.1:2101/1001 | wc -c
+cat > /etc/systemd/system/wormhole-$N-stream.service <<EOF
+[Unit]
+Description=Wormhole streaming server ($N group, TCP data port $N, admin port $ADMIN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$DIR
+Environment=STREAM_LOG_FILE=$DIR/streaming.log
+ExecStart=$DIR/venv/bin/python3 streaming_server.py --port $N --admin-port $ADMIN
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/wormhole-$N-batch.service <<EOF
+[Unit]
+Description=Wormhole IoT File Server ($N group, batch upload, port $BATCH)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$DIR
+Environment=LOG_FILE=$DIR/server-batch.log
+ExecStart=$DIR/venv/bin/python3 server.py --no-ssl --port $BATCH
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# only if you did step 6:
+cat > /etc/systemd/system/wormhole-$N-caster.service <<EOF
+[Unit]
+Description=Millipede NTRIP caster ($N group, port $CASTER)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$DIR/caster/millipede-caster
+ExecStart=$DIR/caster/millipede-caster/caster/caster -c $DIR/caster/millipede-caster/etc/caster.yaml
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wormhole-$N-caster wormhole-$N-stream wormhole-$N-batch
+```
+
+(Without step 6, leave `wormhole-$N-caster` out of the last line.)
+
+The same two server units are in the repo as `wormhole-streaming.service` and
+`wormhole.service` (with `@N@`-style placeholders and a `sed` line in their header),
+for when you want to install them without this block.
+
+✅ **Check:**
+
+```bash
+systemctl is-active wormhole-$N-stream wormhole-$N-batch wormhole-$N-caster
+ss -ltnp | grep -E ":($N|$ADMIN|$CASTER|$BATCH) "
+journalctl -u wormhole-$N-stream -n 20 --no-pager
+```
+
+All `active`; the four ports listening — N, N+2 and N+3 on `0.0.0.0`, N+1 on
+`127.0.0.1` only. With the caster enabled the stream log shows
+`ntrip caster push: 127.0.0.1:<N+2>, stations [1001]`.
+
+Notes:
+
+- `Restart=always`, not `on-failure`: `on-failure` does not cover a clean exit or an
+  operator stop. One receiver was once found dead for nine days after a manual stop,
+  silently replaced by a hand-started process that did not survive a reboot. When
+  debugging, check it is the *service* that runs (`systemctl is-active`), not a
+  leftover terminal process.
+- The ports are passed on the command line **and** set in `.env`. The command line
+  wins; `.env` is what the tools (`stream_cli`, `generate_config.py`) read. Keep both
+  equal — step 0/4 does that for you.
+- `User=root` is what the existing instances use. For a dedicated user instead:
+  `useradd -r -s /usr/sbin/nologin wormhole && chown -R wormhole: "$DIR"`, then
+  `User=wormhole` in all three units.
+
+## 8. Firewall
+
+🖥 **server** (ufw):
+
+```bash
+ufw allow $N/tcp      comment "wormhole $N stream (devices)"
+ufw allow $BATCH/tcp  comment "wormhole $N batch (devices)"
+ufw allow $CASTER/tcp comment "wormhole $N caster (rovers)"   # only with step 6
+ufw status | grep -E "^($N|$CASTER|$BATCH)/"
+```
+
+**Never open N+1** (admin).
+
+If the server sits behind a provider firewall (IONOS/1&1 cloud panel, Hetzner,
+AWS security group, …) open the same ports there too — ufw alone is then not enough.
+
+✅ **Check** — 💻 **your PC**, fill in the address and port by hand this once:
+
+```bash
+nc -vz 203.0.113.10 11000      # must say "succeeded"/"open"
+```
+
+## 9. Point a device at it
+
+Print the exact lines for the device — 🖥 **server**:
+
+```bash
+echo "operation_mode = 1
+streaming_server_ip = $SERVER_IP
+streaming_server_port = $N
+streaming_station_id = 1001
+streaming_cli_secret = $(grep '^STREAM_CLI_SECRET=' "$DIR/.env" | cut -d= -f2)"
+```
+
+Copy them into `CONFIG.TXT` on the device's SD card. `operation_mode = 1` switches
+batch upload off — the two modes are mutually exclusive.
+
+Confirm the device is really talking to *this* instance by watching its files grow,
+not by a connection log line alone — 🖥 **server**:
+
+```bash
+curl -s -H "X-API-Key: $(grep '^API_KEY=' "$DIR/.env" | cut -d= -f2)" http://127.0.0.1:$ADMIN/stream/stations
+watch -n5 "du -sh $DIR/data/incoming_stream/*/*"
+```
+
+## 10. Reach the admin API from your PC (SSH tunnel)
+
+💻 **your PC** — *not* in the SSH session on the server. Example for instance 11000:
+
+```bash
+ssh -L 11001:localhost:11001 root@203.0.113.10
+```
+
+Keep that window open. While it is, `http://localhost:11001/…` **on your PC** is the
+admin API of that instance, e.g. (💻 your PC, second terminal):
+
+```bash
+curl -s -H "X-API-Key: PASTE_API_KEY" http://localhost:11001/stream/stations
+```
+
+Close the tunnel with `exit`. Typed on the server, the same `ssh -L` command opens
+an SSH session from the server to itself and **grabs port N+1 on the server** — the
+streaming service can then no longer bind its admin port (see *Troubleshooting*).
+
+---
+
+## Verifying the caster
+
+🖥 **server**, with a station pushing (the real device, or `fake_device.py` from
+step 5):
+
+```bash
+curl -s --max-time 5 http://127.0.0.1:$CASTER/            # sourcetable
+curl -s --max-time 10 -H "Ntrip-Version: Ntrip/2.0" http://127.0.0.1:$CASTER/1001 | wc -c
 ```
 
 The sourcetable must show one `STR;1001;...` line and the pull must return a
@@ -213,120 +436,31 @@ not push to a virtual mountpoint. The generated sourcetable gets this right; you
 only meet it after hand-editing the file or copying a `STR` line out of Millipede's
 own sample config. See `caster/README.md`.
 
-## 7. systemd
+## Troubleshooting
 
-Two system units, one per server. Adjust `User=` and the paths.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `syntax error near unexpected token 'newline'` | A literal `<placeholder>` was typed | Replace the whole `<…>` including the brackets |
+| `address already in use` in the stream log, admin API not answering | Something else holds port N+1 — typically an `ssh -L` that was run **on the server** | `ss -ltnp \| grep :$ADMIN` shows the owner; close that SSH session (`exit`) or `kill` the `ssh -L` pid, then `systemctl restart wormhole-$N-stream` |
+| `curl` to the admin API: `401 Invalid API key` | Wrong or missing `X-API-Key` | Use the key from **this** instance's `.env` |
+| Device connects but remote CLI is refused | `streaming_cli_secret` on the device ≠ `STREAM_CLI_SECRET` | Re-print step 9 and fix `CONFIG.TXT` |
+| Stream log: `STREAM_CLI_SECRET is empty` | Step 4 skipped or incomplete | Run step 4's `setenv STREAM_CLI_SECRET "$(gen)"`, restart the stream service |
+| Stream log keeps reconnecting to the caster | `STREAM_CASTER_ENABLE=true` but no caster running (step 6 skipped, or `.env` copied from another instance) | Do step 6 + the caster unit, or set `STREAM_CASTER_ENABLE=false` |
+| `git pull`: `not a git repository` | Code was unpacked from a ZIP | `git init -b main && git remote add origin https://github.com/al3xand3w0lf/wormhole.git && git fetch origin main && git reset origin/main && git checkout -- .` (keeps `.env`, `venv/`, `data/` — they are git-ignored) |
+| Device cannot connect at all, `nc` from your PC fails | Port not open in ufw **or** in the provider's firewall | Step 8 |
 
-```bash
-sudo tee /etc/systemd/system/wormhole.service >/dev/null <<'EOF'
-[Unit]
-Description=Wormhole IoT File Server (batch)
-After=network.target
-
-[Service]
-Type=simple
-User=wormhole
-WorkingDirectory=/opt/wormhole
-ExecStart=/opt/wormhole/venv/bin/python server.py --no-ssl
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo tee /etc/systemd/system/wormhole-streaming.service >/dev/null <<'EOF'
-[Unit]
-Description=Wormhole Streaming Server (TCP data plane + admin API)
-# No ordering dependency on the caster: it listens on loopback and the sink
-# reconnects on a fixed delay, so a caster that is down must never hold up or
-# stop the receiver.
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=wormhole
-WorkingDirectory=/opt/wormhole
-ExecStart=/opt/wormhole/venv/bin/python streaming_server.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now wormhole wormhole-streaming
-systemctl status wormhole-streaming
-journalctl -u wormhole-streaming -f
-```
-
-Use `Restart=always`, not `Restart=on-failure`. `on-failure` does not cover a clean
-exit or an operator stop: one of these receivers was once found dead for nine days
-after a manual stop, silently replaced by a hand-started process that did not
-survive a reboot. If you ever debug a receiver, check it is the *service* that is
-running — `systemctl is-active` — and not a leftover terminal process.
-
-## 8. Firewall
-
-```bash
-sudo ufw allow 9000/tcp comment 'wormhole streaming (devices)'
-sudo ufw allow 8000/tcp comment 'wormhole batch uploads'
-sudo ufw allow 2101/tcp comment 'NTRIP caster (rovers)'
-```
-
-Open **9000** for the devices, **8000** if devices upload files, **2101** only if
-rovers outside this host pull from the caster. Never open **9001**. `caster/setup.sh`
-deliberately touches no firewall rule.
-
-## 9. Point a device at it
-
-In `CONFIG.TXT` on the device's SD card:
-
-```
-operation_mode = 1
-streaming_server_ip = <server>
-streaming_server_port = 9000
-streaming_station_id = 1001
-streaming_cli_secret = <same as STREAM_CLI_SECRET>
-```
-
-`operation_mode = 1` switches batch upload off — the two modes are mutually
-exclusive. Confirm the device is really talking to *this* server by watching its
-files grow, not by a connection log line alone:
-
-```bash
-curl -s -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
-watch -n5 'du -sh data/incoming_stream/1001/*'
-```
-
-## 10. Several instances on one host
-
-Give each instance its own directory, venv, `.env`, `data/` tree and systemd units,
-and one **contiguous port block named after its streaming port** — the batch port
-belongs next to the streaming port, not in an unrelated range:
-
-| Instance | Stream | Admin | Caster | Batch |
-|---|---|---|---|---|
-| `wormhole_9000` | 9000 | 9001 | 9002 | 9003 |
-| `wormhole_10000` | 10000 | 10001 | 10002 | 10003 |
-
-The directory name then tells you the whole range at a glance.
-
-One caveat: `caster/setup.sh` always names its user unit `millipede-caster.service`,
-so a second instance's setup run overwrites the first instance's unit. Rename the
-unit (and its `ExecStart` paths) per instance if you run more than one bundled
-caster on one host.
+Who holds which port, at any time: `ss -ltnp | grep -E ":($N|$ADMIN|$CASTER|$BATCH) "`.
 
 ## Updating
 
+🖥 **server** (step 0 first):
+
 ```bash
-cd /opt/wormhole
+cd "$DIR"
 git pull
-./venv/bin/pip install -r requirements.txt
+./venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 ./venv/bin/python -m pytest -q
-sudo systemctl restart wormhole wormhole-streaming
+systemctl restart wormhole-$N-stream wormhole-$N-batch
 ```
 
 Run the suite *before* the restart: it is fast, needs nothing, and catches a
@@ -337,18 +471,18 @@ dependency that did not survive the upgrade.
 With a domain:
 
 ```bash
-sudo apt install -y certbot
-sudo certbot certonly --standalone -d <domain>
+apt install -y certbot
+certbot certonly --standalone -d your.domain.example
 ```
 
 ```ini
-SSL_CERTFILE=/etc/letsencrypt/live/<domain>/fullchain.pem
-SSL_KEYFILE=/etc/letsencrypt/live/<domain>/privkey.pem
+SSL_CERTFILE=/etc/letsencrypt/live/your.domain.example/fullchain.pem
+SSL_KEYFILE=/etc/letsencrypt/live/your.domain.example/privkey.pem
 ```
 
-Then drop `--no-ssl` from the unit's `ExecStart`. Without a domain, `bash
-generate-ssl.sh` writes a self-signed pair. The streaming socket has no TLS at all —
-see "Not implemented" in `README.md`.
+Then drop `--no-ssl` from the batch unit's `ExecStart`. Without a domain,
+`bash generate-ssl.sh` writes a self-signed pair. The streaming socket has no TLS at
+all — see "Not implemented" in `README.md`.
 
 ## Disk space
 
@@ -362,17 +496,21 @@ a false economy on a production receiver — see below.
 
 ## Operating
 
+🖥 **server** (step 0 first):
+
 ```bash
+KEY=$(grep '^API_KEY=' "$DIR/.env" | cut -d= -f2)
+
 # Who is connected? GNSS clock, frame counters, resyncs, RTCM3 types
-curl -s -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
+curl -s -H "X-API-Key: $KEY" http://127.0.0.1:$ADMIN/stream/stations
 
 # Send a command to a device (device-side allowlist + shared secret apply)
-curl -s -X POST http://127.0.0.1:9001/stream/1001/cli \
-     -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+curl -s -X POST http://127.0.0.1:$ADMIN/stream/1001/cli \
+     -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
      -d '{"cmd": "sysinfo"}'
 
 # Interactive terminal over the same endpoint (reads .env itself)
-python3 stream_cli/stream_cli.py --station 1001
+cd "$DIR" && ./venv/bin/python stream_cli/stream_cli.py --station 1001
 ```
 
 `resync_events` and `garbage_bytes` staying at **0** is the expected steady state,

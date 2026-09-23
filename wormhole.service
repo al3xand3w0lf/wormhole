@@ -1,13 +1,21 @@
+# Batch file server of one wormhole instance. Same unit as step 7 of
+# server-deployment.md, which writes it with the values filled in - use that.
+# By hand: replace @N@ (instance number = streaming port), @BATCH@ (N+3) and
+# @DIR@ (/opt/wormhole_@N@), install as /etc/systemd/system/wormhole-@N@-batch.service:
+#   sed -e "s#@N@#$N#g" -e "s#@BATCH@#$BATCH#g" -e "s#@DIR@#$DIR#g" wormhole.service \
+#       > /etc/systemd/system/wormhole-$N-batch.service
 [Unit]
-Description=Wormhole IoT File Server
+Description=Wormhole IoT File Server (@N@ group, batch upload, port @BATCH@)
 After=network.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=<INSTALL_DIR>
-ExecStart=<INSTALL_DIR>/venv/bin/python3 server.py --no-ssl
-Restart=on-failure
+WorkingDirectory=@DIR@
+Environment=LOG_FILE=@DIR@/server-batch.log
+ExecStart=@DIR@/venv/bin/python3 server.py --no-ssl --port @BATCH@
+# always, not on-failure: on-failure misses a clean exit / operator stop
+Restart=always
 RestartSec=5
 
 [Install]

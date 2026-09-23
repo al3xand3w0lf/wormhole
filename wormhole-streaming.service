@@ -1,13 +1,22 @@
+# Streaming server of one wormhole instance. Same unit as step 7 of
+# server-deployment.md, which writes it with the values filled in - use that.
+# By hand: replace @N@ (instance number = streaming port), @ADMIN@ (N+1) and
+# @DIR@ (/opt/wormhole_@N@), install as /etc/systemd/system/wormhole-@N@-stream.service:
+#   sed -e "s#@N@#$N#g" -e "s#@ADMIN@#$ADMIN#g" -e "s#@DIR@#$DIR#g" wormhole-streaming.service \
+#       > /etc/systemd/system/wormhole-$N-stream.service
 [Unit]
-Description=Wormhole Streaming Server (TCP data plane + admin API)
-After=network.target
+Description=Wormhole streaming server (@N@ group, TCP data port @N@, admin port @ADMIN@)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=<INSTALL_DIR>
-ExecStart=<INSTALL_DIR>/venv/bin/python streaming_server.py
-Restart=on-failure
+User=root
+WorkingDirectory=@DIR@
+Environment=STREAM_LOG_FILE=@DIR@/streaming.log
+ExecStart=@DIR@/venv/bin/python3 streaming_server.py --port @N@ --admin-port @ADMIN@
+# always, not on-failure: on-failure misses a clean exit / operator stop
+Restart=always
 RestartSec=5
 
 [Install]
