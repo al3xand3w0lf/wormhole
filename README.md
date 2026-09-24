@@ -11,6 +11,16 @@ services** and do not import each other.
 
 Run one, or both. → [Streaming Server](#streaming-server) (jump to the second half)
 
+**Quick install** — a guided installer sets up a complete instance (ports, secrets,
+NTRIP caster, systemd, firewall, server test) and manages it afterwards:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/al3xand3w0lf/wormhole/main/install.sh
+bash install.sh
+```
+
+Details: [`docs/installer-2026-09-23.md`](docs/installer-2026-09-23.md); by hand: [`server-deployment.md`](server-deployment.md).
+
 ---
 
 # Batch File Server (`server.py`)
@@ -429,6 +439,7 @@ for a stated reason:
 | change the time convention | `streaming/gpstime.py::gps_to_datetime()` |
 | change the file layout | `streaming/sinks.py` |
 | forward data somewhere (NTRIP caster, message bus, live fan-out) | add a `Sink` subclass — the framer and routing stay untouched |
+| generate your device's configuration files | replace `configgen/data/` (schema + one template per role) — the shipped set is an **example**; the generator (`/config/` on the admin port, or `python3 -m configgen`) reads whatever it finds there |
 
 ## NTRIP caster
 
@@ -499,7 +510,10 @@ wormhole/
 ├── replay.py                        # Streaming: replay a raw capture
 ├── fake_device.py                   # Streaming: device emulator
 ├── caster/                          # Bundled NTRIP caster (Millipede): setup.sh, generate_config.py
-├── tools/                           # ntrip_relay.py — relay a mountpoint into one or more casters
+├── tools/                           # ntrip_relay.py (relay a mountpoint), gnss_tunnel.py + ubx_check.py (GNSS maintenance tunnel)
+├── configgen/                       # Device configuration generator; data/ holds an EXAMPLE schema + role templates
+├── install.sh                       # Guided installer / manage menu (whiptail)
+├── docs/installer-2026-09-23.md     # Installer documentation
 ├── stream_cli/                      # Interactive terminal over the admin API (stdlib only)
 ├── tests/                           # Streaming: pytest suite
 ├── pytest.ini

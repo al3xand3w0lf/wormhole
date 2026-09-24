@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from . import config
 from .caster_provision import CasterArpSink, CasterAutoProvision
 from .frames import ROLE_BASE, ROLE_ROVER
+from .gnss_tunnel import registry as tunnel_registry
 from .framer import StreamFramer
 from .ntrip import NtripCasterSink
 from .pipeline import decode_ident, is_ident, route_frame
@@ -164,6 +165,9 @@ _manual_bases: dict[int, set[int]] = {}
 # the server starts listening, so _make_sinks() can attach a RoverSourceSink to a
 # base the moment it connects. Empty means no in-fleet routing is configured.
 _base_routers: dict[int, "RoverRouter"] = {}
+# Strong references to the auto-registered routers' run() tasks - see
+# _auto_register_base(). Without them those tasks are garbage-collectable.
+_router_tasks: dict[int, asyncio.Future] = {}
 
 
 def _ensure_base_router(station_id: int) -> None:
@@ -182,7 +186,16 @@ def _ensure_base_router(station_id: int) -> None:
     router = RoverRouter(registry, set(), config.STREAM_ROVER_QUEUE,
                          config.STREAM_ROVER_RTCM_TYPES, base_station_id=station_id)
     _base_routers[station_id] = router
-    asyncio.ensure_future(router.run())
+    # ⚠ KEEP THE TASK. The event loop holds only a weak reference to a task, and
+    # router.run() parks on an asyncio.Event nobody else references - so a bare
+    # ensure_future() left the whole cycle unreachable. The garbage collector was
+    # then free to destroy it, and destroying it runs run()'s `finally`, which
+    # CANCELS EVERY ROVER SENDER on this base: auto-registered bases silently
+    # stopped handing out corrections, whenever a collection happened to run.
+    # Found 2026-09-17 when one more test file shifted GC timing enough for
+    # test_rover_auto_e2e to see "Task was destroyed but it is pending!".
+    # pipeline.py's file-transfer task documents the same trap.
+    _router_tasks[station_id] = asyncio.ensure_future(router.run())
     logger.info("rover downlink: auto-registered base %d (role=base, trusted)", station_id)
 
 
@@ -355,6 +368,46 @@ async def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
     return api_key
 
 
+class GnssTunnelRequest(BaseModel):
+    """Open a GNSS maintenance tunnel (K-01 Etappe 2).
+
+    The baud is the device's UART1 rate, NOT anything about this TCP hop - over
+    TCP there is no baud rate to match, which is exactly the trap the first bench
+    attempt fell into. The rate that matters is the
+    one the receiver is speaking, and it is pinned here rather than negotiated.
+    """
+
+    # "auto" is the normal case: the LIVE link rate, which on a configured device
+    # is 921600 and is NOT the rate the boot-time baud scan reported.
+    baud: str = Field("auto", pattern=r"^(auto|\d{4,6})$")
+    # Receiver stuck in its boot ROM after a failed update: power-cycle it and
+    # open a SILENT tunnel, so the tool's training sequence is the first thing
+    # the fresh ROM hears and binds its auto-baud to.
+    rescue: bool = False
+    # Rescue only: the rate the tool moves to for the download.
+    # ⚠ Over UART3 the device detects the switch itself, by the ~1.2 s pause the
+    # tool makes. Over THIS path it does not - see the switch endpoint below.
+    # Passing it here still matters: it becomes the default for a later
+    # `gnsstunnel/switch` with no rate, so the operator names it once, while
+    # planning, instead of during a running flash.
+    switch_baud: int | None = Field(None, ge=4800, le=921600)
+    # Device-side session timeout, counted only against operator silence.
+    idle_s: int | None = Field(None, ge=10, le=1800)
+    # 0 = let the OS choose. Always bound to loopback; see gnss_tunnel.py.
+    port: int = Field(0, ge=0, le=65535)
+
+
+class GnssTunnelSwitchRequest(BaseModel):
+    """Move a running session to the download rate.
+
+    `baud` omitted means the rate the session was opened with (--switch-baud):
+    the operator is typing this while watching a flash tool count, and making
+    them repeat a number at that moment is how typos happen.
+    """
+
+    baud: int | None = Field(None, ge=4800, le=921600)
+
+
 class CliRequest(BaseModel):
     # Printable ASCII only — encode_cmd_request() puts the command on the wire as
     # ascii. Rejecting here answers 422 instead of letting the encode fail deeper in
@@ -364,6 +417,19 @@ class CliRequest(BaseModel):
 
 
 admin = FastAPI(title="Streaming Server", version="0.1.0")
+
+# The configuration generator. Mounted here rather than on the batch server
+# because this app binds to loopback: the generator prefills a device file with
+# this installation's own API key and remote-CLI token, so it must not be
+# reachable from outside. Its routes carry a second, independent loopback check
+# of their own - see configgen/router.py.
+try:
+    from configgen.router import build_router as _build_configgen_router
+
+    admin.include_router(_build_configgen_router(config), prefix="/config",
+                         tags=["Config"])
+except Exception:  # noqa: BLE001 - the generator is optional, the server is not
+    logger.exception("config generator not mounted")
 
 
 @admin.get("/health", tags=["System"])
@@ -378,7 +444,10 @@ async def health():
 
 @admin.get("/stream/stations", tags=["Stream"])
 async def list_stations(_: str = Depends(verify_api_key)):
-    return {"stations": [s.status() for s in registry.all()]}
+    return {"stations": [
+        {**s.status(), "role": _station_roles.get(s.station_id, 0)}
+        for s in registry.all()
+    ]}
 
 
 @admin.get("/stream/rover", tags=["Stream"])
@@ -555,6 +624,159 @@ async def send_cli(station_id: int, req: CliRequest, _: str = Depends(verify_api
 
 
 # ==========================================================================
+# GNSS maintenance tunnel (K-01 Etappe 2)
+# ==========================================================================
+@admin.post("/stream/{station_id}/gnsstunnel/open", tags=["Stream"])
+async def gnsstunnel_open(station_id: int, req: GnssTunnelRequest,
+                          _: str = Depends(verify_api_key)):
+    """Start a bridge session on the device and expose it as a local TCP port.
+
+    Order matters: the listener is bound BEFORE the device is told to open its
+    side. The reverse order leaves a window in which the device is tunnelling
+    into a port that does not exist yet - and because the device suspends its
+    receiver handling for the whole session, that window costs a real session and
+    a receiver recovery, not just a retry.
+    """
+    session = registry.get(station_id)
+    if session is None:
+        raise HTTPException(404, f"unknown station {station_id}")
+    if not session.connected:
+        raise HTTPException(409, f"station {station_id} not connected")
+    if tunnel_registry.get(station_id) is not None:
+        raise HTTPException(409, f"station {station_id} already has a tunnel open")
+
+    tunnel = await tunnel_registry.open(session, config.STREAM_ADMIN_HOST, req.port)
+
+    # Build the device-side command. Same syntax the bench CLI uses; the device
+    # picks the SOCKET transport by itself because the command arrives over the
+    # streaming socket (see gnssbridge_transport() in cli.c).
+    if req.rescue:
+        baud = req.baud if req.baud != "auto" else "9600"
+        parts = ["gnssbridge", "rescue", baud]
+        parts.append(str(req.switch_baud or 0))
+        if req.idle_s:
+            parts.append(str(req.idle_s))
+    else:
+        parts = ["gnssbridge", req.baud]
+        if req.idle_s:
+            parts.append(str(req.idle_s))
+    cmd = " ".join(parts)
+
+    try:
+        text = await session.send_cli(cmd, config.STREAM_CLI_SECRET,
+                                      config.STREAM_CLI_TIMEOUT)
+    except Exception as exc:
+        # The device refused or did not answer: tear the listener down again
+        # rather than leave a port that pipes into nothing.
+        await tunnel_registry.close(station_id)
+        raise HTTPException(502, f"device did not start the bridge: {exc}") from exc
+
+    # A device that ANSWERED can still have refused. The CLI transport only says
+    # the command arrived; whether a session started is in the text. Without this
+    # check the listener stayed open and the tool printed "tunnel open" for a
+    # device that had said "bridge NOT started" - found 2026-09-17 when the
+    # firmware began refusing sessions during a receiver recovery. A port that
+    # pipes into a refused session looks exactly like a broken link.
+    if "NOT started" in text:
+        await tunnel_registry.close(station_id)
+        raise HTTPException(409, f"device refused the session: {text.strip()}")
+
+    return {
+        "ok": True,
+        "station_id": station_id,
+        "cmd": cmd,
+        "device_response": text,
+        "tunnel": tunnel.status(),
+        "hint": (
+            f"ssh -L {tunnel.port}:127.0.0.1:{tunnel.port} <server>, then point the "
+            "virtual COM port at localhost:%d with NVT/RFC2217 OFF" % tunnel.port
+        ),
+    }
+
+
+@admin.post("/stream/{station_id}/gnsstunnel/switch", tags=["Stream"])
+async def gnsstunnel_switch(station_id: int, req: GnssTunnelSwitchRequest,
+                            _: str = Depends(verify_api_key)):
+    """Move a RUNNING session to the download rate, on the operator's word.
+
+    The device can infer this from a pause in the operator's traffic, and over a
+    cable it does. Over LTE it cannot: the modem delivers the downlink in bursts
+    that swallow the pause, and ubxfwupdate retries every 1.0 s against the
+    device's 900 ms threshold, so every retry restarts the clock. Measured
+    2026-09-21: the tool switched at t=4.7 s, gave up at 7.9 s, and the bridge
+    followed at ~8.8 s - after the run had already failed.
+
+    The operator, meanwhile, is reading "Setting baudrate to N" on their own
+    screen. This endpoint turns that knowledge into a statement.
+
+    No tunnel object is touched: the rate lives on the DEVICE side of the link,
+    and the command rides the same token-protected CLI as open and close. We do
+    require an open tunnel, because a switch without one is certainly a mistake.
+    """
+    if tunnel_registry.get(station_id) is None:
+        raise HTTPException(status_code=409,
+                            detail=f"no GNSS tunnel is open for station {station_id}")
+
+    session = registry.get(station_id)
+    if session is None or not session.connected:
+        raise HTTPException(status_code=409,
+                            detail=f"station {station_id} not connected")
+
+    cmd = "gnssbridge switch" + (f" {req.baud}" if req.baud else "")
+    try:
+        device_response = await session.send_cli(
+            cmd, config.STREAM_CLI_SECRET, config.STREAM_CLI_TIMEOUT)
+    except Exception as exc:
+        raise HTTPException(status_code=504,
+                            detail=f"station {station_id} did not answer: {exc}")
+
+    # ⚠ The device's ANSWER decides, not the fact that the command arrived. The
+    # same distinction cost a bench run on 2026-09-17, when `open` reported a
+    # tunnel for a session the device had refused.
+    text = (device_response or "").strip()
+    if "REFUSED" in text or "no bridge session" in text:
+        raise HTTPException(status_code=409, detail=f"device refused: {text}")
+
+    return {"ok": True, "station_id": station_id, "device_response": text}
+
+
+@admin.post("/stream/{station_id}/gnsstunnel/close", tags=["Stream"])
+async def gnsstunnel_close(station_id: int, _: str = Depends(verify_api_key)):
+    """Close the local listener and ask the device to end its session."""
+    tunnel = tunnel_registry.get(station_id)
+    status_before = tunnel.status() if tunnel is not None else None
+
+    # Tell the device first here - the opposite of open(), and for the same
+    # reason: whichever side is torn down second must not be the one still
+    # sending. A device left in a session is the expensive half (it holds the
+    # receiver), so it is stopped first and the listener follows.
+    device_response = None
+    session = registry.get(station_id)
+    if session is not None and session.connected:
+        try:
+            device_response = await session.send_cli(
+                "gnssbridge stop", config.STREAM_CLI_SECRET, config.STREAM_CLI_TIMEOUT)
+        except Exception as exc:
+            # Still tear our side down: the device has an idle timeout and a hard
+            # session cap of its own precisely so a lost operator cannot strand it.
+            device_response = f"(no answer: {exc})"
+
+    closed = await tunnel_registry.close(station_id)
+    return {
+        "ok": True,
+        "station_id": station_id,
+        "listener_closed": closed,
+        "device_response": device_response,
+        "stats": status_before,
+    }
+
+
+@admin.get("/stream/gnsstunnel", tags=["Stream"])
+async def gnsstunnel_status(_: str = Depends(verify_api_key)):
+    return {"tunnels": tunnel_registry.all_status()}
+
+
+# ==========================================================================
 # Lifecycle
 # ==========================================================================
 async def run() -> None:
@@ -641,7 +863,8 @@ async def run() -> None:
                     base_id, sorted(rover_ids))
 
     # --- Automatic rover -> nearest-base subscription (optional) -----------
-    # Needs no source of its own: it only ever calls add_rover()/remove_rover() on routers
+    # Needs no source
+    # of its own: it only ever calls add_rover()/remove_rover() on routers
     # that already exist (the ones just built above, plus any a role=base
     # IDENT registers later via _ensure_base_router()). A station already
     # hand-pinned above (or in STREAM_ROVER_STATIONS) is never touched by it.
@@ -662,6 +885,36 @@ async def run() -> None:
     logger.info("TCP data plane on %s:%d", config.STREAM_HOST, config.STREAM_PORT)
     if not config.STREAM_CLI_SECRET:
         logger.warning("STREAM_CLI_SECRET is empty - remote CLI is unauthenticated")
+    else:
+        # A token longer than the device's field can never match.
+        #
+        # The DEVICE is the side that authenticates: the server puts
+        # [tok_len][token] in front of every command, and the device compares
+        # the length first, then the bytes. Its field is fixed-size, so a longer
+        # token is truncated when it reads its configuration - silently, because
+        # truncation is not an error there. The two values then still look
+        # identical wherever a human compares them: the .env and the device's own
+        # file both hold the full string. Only the comparison inside the device
+        # sees a shorter one, and every command comes back "auth failed".
+        #
+        # That is expensive to debug, because "auth failed" points at the VALUE
+        # while the fault is in the LENGTH. So it is said here, at startup, where
+        # the mismatch actually originates.
+        try:
+            from configgen.schema import load as _load_device_schema
+
+            limit = _load_device_schema().by_key["streaming_cli_secret"]["max_len"]
+            usable = limit - 1                      # the field keeps a terminator
+            if len(config.STREAM_CLI_SECRET) > usable:
+                logger.warning(
+                    "STREAM_CLI_SECRET is %d characters, but a device stores at "
+                    "most %d - it truncates the rest without complaining and then "
+                    "rejects every remote CLI command with 'auth failed'. Shorten "
+                    "it on both sides, or leave it empty.",
+                    len(config.STREAM_CLI_SECRET), usable)
+        except Exception:  # noqa: BLE001 - the schema is optional, the server is not
+            logger.debug("could not check STREAM_CLI_SECRET against the device schema",
+                         exc_info=True)
 
     uv = uvicorn.Server(
         uvicorn.Config(

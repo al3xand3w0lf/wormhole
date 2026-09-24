@@ -155,7 +155,6 @@ async def test_connection_without_ident_is_dropped(tmp_path, monkeypatch):
     await srv.wait_closed()
 
 
-
 @pytest.mark.asyncio
 async def test_station_name_from_ident_labels_the_archive(tmp_path, monkeypatch):
     """The wiring this feature actually depends on: handle_connection() must

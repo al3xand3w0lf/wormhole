@@ -8,8 +8,8 @@ import math
 
 from streaming.geo import ecef_distance, from_navpvt, wgs84_to_ecef
 
-# A real-world reference point: a base station's 1005 ARP, decoded straight
-# off pyrtcm, metres.
+# A reference point:
+# station 290's 1005 ARP, decoded straight off pyrtcm, metres.
 _REF_ECEF = (4278387.4699, 635620.7099, 4672340.0400)
 _REF_LLA = (47.400298, 8.450366, 459.4)  # lat, lon, height(m) - reported in the same doc
 

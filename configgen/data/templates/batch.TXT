@@ -1,0 +1,55 @@
+Example device config file - BATCH (upload finished files)
+----------------------------------------------------------
+
+[EXAMPLE configuration for the configuration generator. Replace these files]
+[and ../device_config.schema.json with your own device's layout: the generator]
+[reads whatever schema and templates it finds here.]
+
+[Logs to the SD card and uploads finished files. No live connection.]
+
+--- ROLE ---
+
+[station_mode decides everything below. Values: batch / stream / base / rover]
+[operation_mode is kept in step with it for older firmware - keep both.]
+
+station_mode = batch
+operation_mode = 0
+
+--- Station identity ---
+
+station = EX01
+antenna = EXAMPLE-ANTENNA-L1L2
+
+--- Cellular ---
+
+[numbers 2 and 3 are disabled by the x in their name - remove it to activate]
+phone_number  = +10000000000
+phone_xnumber2 = +10000000002
+phone_xnumber3 = +10000000003
+
+[keep the padding on the next three lines - older firmware matches it]
+apn    = internet.example
+user   = example
+passwd = example
+
+--- Upload ---
+
+enable_upload = 1
+upload_protocol = 0
+
+[FTP - required in this role even when uploading over HTTP]
+server_ftp = ftp.example.org
+user_ftp = station
+passwd_ftp = example
+
+[HTTP - used when the protocol above is set to 1]
+http_server = files.example.org
+http_port = 8000
+http_api_key =
+
+--- GNSS ---
+
+[rate index: 1 is 0.25s, 2 is 0.5s, 3 is 1s, 4 is 5s]
+sampling_interval = 3
+
+[END]

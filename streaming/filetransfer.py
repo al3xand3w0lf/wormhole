@@ -25,7 +25,16 @@ from pathlib import Path
 from downloads import resolve_download, sanitize_filename
 
 from . import stationdir
-from .frames import FileUpBegin, FileUpData, encode_file_begin
+from .frames import (
+    UP_ACK_ABORTED,
+    UP_ACK_CRC_MISMATCH,
+    UP_ACK_OK,
+    UP_ACK_SIZE_MISMATCH,
+    FileUpBegin,
+    FileUpData,
+    encode_file_begin,
+    encode_file_up_ack,
+)
 
 logger = logging.getLogger("streaming")
 
@@ -147,7 +156,10 @@ async def send_file(session, name: str) -> None:
 class UploadReceiver:
     """Reassembles one incoming file for a station."""
 
-    def __init__(self, root: Path, station_id: int):
+    def __init__(self, root: Path, station_id: int, reply=None):
+        # `reply(bytes)` sends a frame back to the device - here the FILE_UP_ACK
+        # verdict. None (replay.py, tests) means nobody is listening.
+        self._reply = reply
         # resolve() rather than str(station_id): the station's archive may be
         # under its label ("A001_2001"), and an upload belongs next to it, not
         # in a second bare-id directory. FileSink has already adopted the
@@ -169,7 +181,9 @@ class UploadReceiver:
         return self._fh is not None
 
     def begin(self, msg: FileUpBegin) -> None:
-        self.abort("superseded by a new upload")   # no-op when idle
+        # No ACK here: it would arrive AFTER the new BEGIN and the device would
+        # read it as the verdict on the new file.
+        self.abort("superseded by a new upload", ack=False)   # no-op when idle
 
         safe = sanitize_filename(msg.name)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -219,18 +233,31 @@ class UploadReceiver:
             logger.error("station %s: %s size mismatch (%d of %d bytes)",
                          self.station_id, self.name, self.received, self.total)
             self._part.unlink(missing_ok=True)
+            self._ack(UP_ACK_SIZE_MISMATCH, crc)
             return
         if crc != self.crc_expected:
             logger.error("station %s: %s CRC mismatch (got %08X, want %08X) - discarded",
                          self.station_id, self.name, crc, self.crc_expected)
             self._part.unlink(missing_ok=True)
+            self._ack(UP_ACK_CRC_MISMATCH, crc)
             return
 
         self._part.replace(self._final)      # atomic on the same filesystem
         logger.info("station %s: stored %s (%d bytes, CRC OK)",
                     self.station_id, self._final.name, self.received)
+        # Only after the rename: the device deletes its copy on this ACK, so it
+        # must not go out before the file is really in place.
+        self._ack(UP_ACK_OK, crc)
 
-    def abort(self, reason: str) -> None:
+    def _ack(self, result: int, crc: int) -> None:
+        if self._reply is None:
+            return
+        try:
+            self._reply(encode_file_up_ack(result, crc))
+        except Exception:   # a dead socket must not take the frame loop down
+            logger.warning("station %s: could not send FILE_UP_ACK", self.station_id)
+
+    def abort(self, reason: str, ack: bool = True) -> None:
         if self._fh is None:
             return
         self._fh.close()
@@ -239,3 +266,5 @@ class UploadReceiver:
                        self.station_id, self.name, self.received, self.total, reason)
         if self._part is not None:
             self._part.unlink(missing_ok=True)
+        if ack:
+            self._ack(UP_ACK_ABORTED, self.crc_expected)

@@ -32,6 +32,24 @@ STREAM_ADMIN_HOST = os.getenv("STREAM_ADMIN_HOST", "127.0.0.1")
 STREAM_ADMIN_PORT = int(os.getenv("STREAM_ADMIN_PORT", "9001"))
 STREAM_DIR = Path(os.getenv("STREAM_DIR", BASE_DIR / "data" / "incoming_stream"))
 
+# The address a DEVICE should dial to reach this installation.
+#
+# This cannot be derived from anything else here. HOST and STREAM_HOST are BIND
+# addresses — almost always 0.0.0.0 — and a bind address says which interfaces
+# to listen on, never what a station out in the field should be pointed at.
+# Behind NAT, a reverse proxy or a dynamic DNS name the two have nothing to do
+# with one another.
+#
+# Only the config generator reads it, to prefill the server address in a
+# device's configuration file. Left empty it prefills nothing and says why,
+# which is the right failure mode: a guessed address looks answered, and sends
+# a whole fleet somewhere wrong.
+PUBLIC_HOST = os.getenv("PUBLIC_HOST", "").strip()
+
+# The batch server's port, read from the same key server.py reads, so the
+# generator has no second source of truth for it.
+BATCH_PORT = int(os.getenv("PORT", "8000"))
+
 # Must match `streaming_cli_secret` in the device's CONFIG.TXT. Empty = no auth
 # (the device still expects the tok_len prefix, which we send as 0).
 STREAM_CLI_SECRET = os.getenv("STREAM_CLI_SECRET", "")
@@ -75,11 +93,11 @@ STREAM_ROVER_RTCM_TYPES = {int(s) for s in (p.strip() for p in _rtypes.split(","
 # RoverRouter, no external caster in the path). Format:
 #   "base:rover[+rover...][,base:rover...]"   e.g. "1001:1002" or "1001:1002+1003,1005:1006"
 # Each base gets its own router. This is a *manual pin*: rover_discovery.py's
-# auto-subscription never touches a station id that appears here, or in
-# STREAM_ROVER_STATIONS - a hand-configured pair always wins. Also
-# hot-reloadable: POST /stream/rover/reload or SIGHUP re-reads this key and
-# diffs it against the live routers, add/remove only, no restart
-# (server.py's _apply_rover_bases()).
+# auto-subscription never
+# touches a station id that appears here, or in STREAM_ROVER_STATIONS - a
+# hand-configured pair always wins. Also hot-reloadable: POST
+# /stream/rover/reload or SIGHUP re-reads this key and diffs it against the
+# live routers, add/remove only, no restart (server.py's _apply_rover_bases()).
 def parse_rover_bases(value: str) -> dict[int, set[int]]:
     out: dict[int, set[int]] = {}
     for pair in value.replace(";", ",").split(","):
@@ -96,9 +114,9 @@ def parse_rover_bases(value: str) -> dict[int, set[int]]:
 STREAM_ROVER_BASES = parse_rover_bases(os.getenv("STREAM_ROVER_BASES", ""))
 
 # ---- Automatic rover -> nearest-base subscription (rover_discovery.py) -----
-# A station that identifies (IDENT role byte) as ROLE_ROVER is subscribed to
-# its nearest base automatically, live, no restart. A station identifying as
-# ROLE_BASE only
+# A station that
+# identifies (IDENT role byte) as ROLE_ROVER is subscribed to its nearest base
+# automatically, live, no restart. A station identifying as ROLE_BASE only
 # becomes a correction source if its id is ALSO here or already a
 # STREAM_ROVER_BASES key - role alone is not trust, see rover_discovery.py's
 # module docstring for why.
@@ -114,10 +132,9 @@ STREAM_ROVER_MAX_BASELINE_KM = float(os.getenv("STREAM_ROVER_MAX_BASELINE_KM", "
 # hysteresis against flapping between two bases near their midpoint.
 STREAM_ROVER_SWITCH_MARGIN_KM = float(os.getenv("STREAM_ROVER_SWITCH_MARGIN_KM", "5"))
 
-# The external correction source, an NTRIP caster - used when there is no base
-# in the fleet, or in addition to one. RTK2GO (rtk2go.com) is a good free
-# public caster to test against: it needs no registration for clients, the
-# username can be any valid email address and the password is not checked.
+# The external correction source, an NTRIP caster - used when there is no base in
+# the fleet, or in addition to one. NTRIP clients need no registration there; the
+# username is any valid email and the password is not checked.
 STREAM_NTRIP_HOST = os.getenv("STREAM_NTRIP_HOST", "rtk2go.com")
 STREAM_NTRIP_PORT = int(os.getenv("STREAM_NTRIP_PORT", "2101"))
 STREAM_NTRIP_MOUNT = os.getenv("STREAM_NTRIP_MOUNT", "")

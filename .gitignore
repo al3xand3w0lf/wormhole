@@ -1,5 +1,9 @@
 # Environment & secrets
 .env
+# .env.bak-* and friends carry the API key just as .env does. Keep this on its
+# own line: a trailing "#" comment would be read as part of the pattern.
+.env.*
+!.env.example
 cert.pem
 key.pem
 
@@ -25,6 +29,22 @@ data/incoming_stream/*
 # derived from .env) - see caster/README.md. Never the setup tooling itself.
 caster/millipede-caster/
 
+# Local backups
+*.bak
+*.bak_*
+
 # IDE
 .vscode/
 .idea/
+
+
+# Baseline analysis output: derived CSVs from tests/analyze_baseline.py (tens of MB,
+# regenerable from data/incoming_stream/), and raw archive exports dropped in the
+# repo root. The scripts and the resulting plots/ PNGs are tracked, the bulk is not.
+tests/out/
+*.zip
+
+# GNSS tunnel raw dumps: local diagnostics, and the directory IS the switch
+# (streaming/gnss_tunnel.py). Checked in, a fresh deployment would have the
+# dump switched on unintentionally, in the middle of a flash's data path.
+data/tunnel_dumps/

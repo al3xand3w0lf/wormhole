@@ -32,8 +32,8 @@ _CONNECT_TIMEOUT = 10.0
 _HANDSHAKE_TIMEOUT = 10.0
 
 # Bounded so a stuck/unreachable caster cannot grow memory without limit — frames are
-# dropped, not queued forever, once this fills. RTCM3 frames are small (<=250 B in
-# practice), so this is a few hundred KB at most.
+# dropped, not queued forever, once this fills. RTCM3 frames are small
+# (typically <=250 B), so this is a few hundred KB at most.
 _QUEUE_MAXSIZE = 2048
 
 

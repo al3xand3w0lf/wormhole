@@ -15,7 +15,7 @@ host.auth under caster/millipede-caster/etc/.
 Also derives each station's real position from its own RTCM 1005/1006 ARP (read
 from its most recent archived .rtcm3 file under STREAM_DIR) and writes a
 Millipede "NEAR" virtual mountpoint once at least one station has one - see
-docs/millipede-near-base-2026-08-28.md and streaming/caster_config.py. A station
+streaming/caster_config.py. A station
 with no archive yet just keeps the 0.00/0.00 placeholder; re-run this script
 once it has pushed data to pick up its real position. With
 STREAM_CASTER_AUTO_ENABLE the running server fills that in live instead, off the
@@ -97,10 +97,16 @@ def main() -> None:
 
     env = dotenv_values(ENV_FILE)
     stations = _parse_stations(env.get("STREAM_CASTER_STATIONS", ""))
-    if not stations:
+    # An empty list is a valid starting point when the server provisions bases
+    # itself: the caster then starts with an empty sourcetable and the first
+    # station identifying as role=base fills it in. Without auto-provisioning
+    # an empty caster would stay empty forever, so that is still an error.
+    auto = (env.get("STREAM_CASTER_AUTO_ENABLE") or "").strip().lower() in ("1", "true", "yes", "on")
+    if not stations and not auto:
         sys.exit("STREAM_CASTER_STATIONS is empty in .env - set it to the "
                   "station id(s) that should get a mountpoint, e.g. "
-                  "STREAM_CASTER_STATIONS=1001")
+                  "STREAM_CASTER_STATIONS=1001 (or set STREAM_CASTER_AUTO_ENABLE=true "
+                  "to start empty and let bases provision themselves)")
     port = int(env.get("STREAM_CASTER_PORT", "2101") or "2101")
 
     passwords = _parse_passwords(env.get("STREAM_CASTER_PASSWORDS", ""))

@@ -1,0 +1,48 @@
+Example device config file - STREAM (live raw data, no RTK)
+-----------------------------------------------------------
+
+[EXAMPLE configuration for the configuration generator. Replace these files]
+[and ../device_config.schema.json with your own device's layout: the generator]
+[reads whatever schema and templates it finds here.]
+
+[Sends raw GNSS data live over TCP. No RTK.]
+
+--- ROLE ---
+
+[station_mode decides everything below. Values: batch / stream / base / rover]
+[operation_mode is kept in step with it for older firmware - keep both.]
+
+station_mode = stream
+operation_mode = 1
+
+--- Streaming connection ---
+
+streaming_server_ip = 203.0.113.10
+streaming_server_port = 9000
+streaming_station_id = 1002
+streaming_heartbeat_interval = 30
+streaming_cli_secret =
+
+--- Station identity ---
+
+station = EX02
+antenna = EXAMPLE-ANTENNA-L1L2
+
+--- Cellular ---
+
+[numbers 2 and 3 are disabled by the x in their name - remove it to activate]
+phone_number  = +10000000000
+phone_xnumber2 = +10000000002
+phone_xnumber3 = +10000000003
+
+[keep the padding on the next three lines - older firmware matches it]
+apn    = internet.example
+user   = example
+passwd = example
+
+--- GNSS ---
+
+[rate index: 1 is 0.25s, 2 is 0.5s, 3 is 1s, 4 is 5s]
+sampling_interval = 3
+
+[END]

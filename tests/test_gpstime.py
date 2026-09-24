@@ -16,7 +16,7 @@ from streaming.gpstime import GnssClock, gps_to_datetime, rtc_unix_to_datetime
 
 
 def firmware_gps_time(week: int, rcv_tow: float) -> datetime:
-    """Literal port of the firmware routine (Julian-Date arithmetic, no leap seconds)."""
+    """Literal port of ublox_getGpsTime() (Julian-Date arithmetic, no leap seconds)."""
     sow = math.floor(rcv_tow * 10.0 + 0.5) / 10.0
 
     jd = 2444245.0 + week * 7.0 + math.floor(sow / 86400.0)

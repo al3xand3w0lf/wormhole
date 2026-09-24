@@ -1,4 +1,4 @@
-"""Serving a file down the streaming socket.
+"""Serving a file down the streaming socket .
 
 The contract that matters here is byte-exactness: FILE_BEGIN announces a length
 and a CRC32, and what follows on the wire must be exactly that many raw bytes
@@ -361,3 +361,28 @@ def test_file_up_frames_round_trip():
 
     raw = build_ubx(PRIVATE_CLASS, ID_FILE_UP_DATA, struct.pack("<H", 42) + body)
     assert decode_private(raw) == FileUpData(42, body)
+
+
+def test_upload_ack_is_sent_after_the_file_is_stored(tmp_path):
+    """The device deletes its SD copy on this ACK - it must say OK only for a
+    stored file with matching CRC, and a rejection otherwise."""
+    import zlib as _z
+    from streaming.filetransfer import UploadReceiver
+    from streaming.frames import (FileUpBegin, FileUpData, UP_ACK_CRC_MISMATCH,
+                                  UP_ACK_OK, encode_file_up_ack)
+
+    data = b"x" * 1500
+    crc = _z.crc32(data) & 0xFFFFFFFF
+    sent = []
+    rx = UploadReceiver(tmp_path, 1001, sent.append)
+    rx.begin(FileUpBegin(len(data), crc, "a_log.txt"))
+    rx.data(FileUpData(0, data[:1000]))
+    assert sent == []
+    rx.data(FileUpData(1, data[1000:]))
+    assert sent == [encode_file_up_ack(UP_ACK_OK, crc)]
+    assert list((tmp_path / "1001" / "uploads").glob("a_log_*.txt"))
+
+    sent.clear()
+    rx.begin(FileUpBegin(3, 0xDEADBEEF, "b.txt"))
+    rx.data(FileUpData(0, b"abc"))
+    assert sent == [encode_file_up_ack(UP_ACK_CRC_MISMATCH, _z.crc32(b"abc"))]

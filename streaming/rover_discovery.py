@@ -1,8 +1,7 @@
 """Automatic rover -> nearest-base subscription.
 
-Builds on the mutable `RoverRouter` (rover.py): once a rover's and a
-trusted base's positions are both known, this module does the nearest-base
-selection and calls `add_rover()`/`remove_rover()` for you.
+Builds on the mutable RoverRouter (rover.py): a station that identifies as a
+rover is subscribed to its nearest trusted base, live, with no config edit.
 
 WHAT THIS DOES AND DOES NOT DECIDE
 -----------------------------------

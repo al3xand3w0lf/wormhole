@@ -14,6 +14,7 @@ did not (pre-1.69 firmware). See stationdir.py for why the id stays in it.
                 sensors/ <station>_<stream>_YYYYMMDD.csv    daily, append
                 raw/     <station>_raw_YYYYMMDD_HH.bin      hourly, transport mitschnitt
                 cli/     <station>_cli_YYYYMMDD.log
+                log/     <station>_log_YYYYMMDD.txt       daily, device system log
 
 Rotation is keyed on the station's GPS clock. Because the binary writers are only
 ever handed *whole frames*, a rotation can never split a UBX/RTCM3 message across
@@ -29,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import stationdir
-from .frames import SENSOR_SPECS, SensorReading
+from .frames import SENSOR_SPECS, SensorReading, SyslogLine
 from .gpstime import GnssClock, rtc_unix_to_datetime
 
 CSV_BASE_COLUMNS = ("rtc_unix", "gps_iso", "utc_iso", "leap_s")
@@ -55,6 +56,9 @@ class Sink:
 
     def on_cli(self, line: str, stamp: datetime, sysclk: bool) -> None:
         pass
+
+    def on_syslog(self, entry: SyslogLine) -> None:
+        """One device system-log entry."""
 
     def on_raw(self, data: bytes) -> None:
         """Raw transport bytes, before demux."""
@@ -155,6 +159,8 @@ class FileSink(Sink):
         )
         self._sensors: dict[str, _CsvStream] = {}
         self._sensor_dir = base / "sensors"
+        # Binary so the device's CRLF survives unchanged (see _nmea above).
+        self._syslog = _BinaryStream(base / "log", "{station}_log_{key}.txt")
 
     def on_ubx(self, raw: bytes, stamp: datetime, sysclk: bool) -> None:
         self._ubx.write(raw, hour_key(stamp, sysclk), self.station)
@@ -190,6 +196,15 @@ class FileSink(Sink):
         if self._raw_capture:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             self._raw.write(data, now.strftime("%Y%m%d_%H"), self.station)
+
+    def on_syslog(self, entry: SyslogLine) -> None:
+        # Keyed on the entry's OWN date (device RTC, UTC), not on the GPS clock:
+        # a line belongs to the day the device wrote it on, and the device's
+        # daily rotation uses that same clock. Buffered lines replayed after an
+        # outage therefore still land in the right file.
+        key = f"{2000 + entry.year:04d}{entry.month:02d}{entry.day:02d}"
+        self._syslog.write(entry.formatted().encode("ascii", errors="replace"),
+                           key, self.station)
 
     def on_cli(self, line: str, stamp: datetime, sysclk: bool) -> None:
         direction, _, text = line.partition("\t")
@@ -227,7 +242,7 @@ class FileSink(Sink):
         writer.write_row(row, day_key(gps_dt, sysclk=False), self.station)
 
     def close(self) -> None:
-        for stream in (self._ubx, self._rtcm3, self._raw, self._cli, self._nmea):
+        for stream in (self._ubx, self._rtcm3, self._raw, self._cli, self._nmea, self._syslog):
             stream.close()
         for writer in self._sensors.values():
             writer.close()

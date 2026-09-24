@@ -9,6 +9,28 @@ collide.
 Follow it top to bottom. Every step ends with a check; do not go on while a check
 fails — the mistake is cheapest to fix where it was made.
 
+## Quick install (recommended)
+
+`install.sh` walks through everything below in a menu and produces the same
+instance: directory `/opt/wormhole_N` (or `~/wormhole_N`), units
+`wormhole-N-{stream,batch,caster}`, the four ports N…N+3, `.env` with generated
+secrets, firewall rules and a server test at the end. It also manages the instance
+afterwards: status, update, settings, device `CONFIG.TXT`, uninstall.
+
+🖥 **server** — as a normal user with sudo rights (or root):
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/al3xand3w0lf/wormhole/main/install.sh
+bash install.sh
+```
+
+Download it first and then run it, as above. `curl … | bash` does not work,
+because the menu needs the terminal. Later, `wormhole-setup` opens the same menu.
+Details: `docs/installer-2026-09-23.md`.
+
+The manual steps below are the reference for what the installer does, and the way
+to go where it does not fit (another OS, a hand-tuned setup).
+
 ## Before you start: three rules for reading this guide
 
 **1. Every code block says where it runs.**
@@ -233,11 +255,11 @@ ls -l "$DIR/caster/millipede-caster/caster/caster"
 grep -E '^STREAM_CASTER_(ENABLE|STATIONS|PORT)=' "$DIR/.env"
 ```
 
-> Do **not** use `caster/setup.sh` on a server with several instances. It does the
-> same build, but installs a *user* unit that is always called
-> `millipede-caster.service` — a second instance silently overwrites the first
-> one's. Step 7 uses a per-instance system unit instead. `setup.sh` is meant for a
-> single instance on a desktop/Pi.
+> Plain `caster/setup.sh` does the same build, but also installs a *user* unit
+> that is always called `millipede-caster.service` — on a server with several
+> instances a second one silently overwrites the first one's. Step 7 uses a
+> per-instance system unit instead; `bash caster/setup.sh --no-user-unit` is the
+> build + config above without that user unit.
 
 The caster's own behaviour (idle mountpoints answer 404, anonymous pull, the
 "Mount Point Taken" trap) is described under *Verifying the caster* below and in

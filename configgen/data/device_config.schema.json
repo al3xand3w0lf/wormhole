@@ -1,0 +1,517 @@
+{
+ "schema_for_firmware": "example",
+ "source_of_truth": "an EXAMPLE: replace this file and templates/ with your device's own configuration schema",
+ "roles": [
+  "batch",
+  "stream",
+  "base",
+  "rover"
+ ],
+ "sections": [
+  {
+   "id": "role",
+   "title": "The role - decides everything else"
+  },
+  {
+   "id": "identity",
+   "title": "Station identity"
+  },
+  {
+   "id": "cellular",
+   "title": "Cellular"
+  },
+  {
+   "id": "upload",
+   "title": "Upload target",
+   "choice": {
+    "key": "upload_protocol",
+    "groups": {
+     "0": "ftp",
+     "1": "http"
+    },
+    "labels": {
+     "ftp": "FTP",
+     "http": "HTTP"
+    },
+    "keep_inactive": true,
+    "inactive_note": "still required by the example firmware, which decides this from the role and not from the protocol"
+   }
+  },
+  {
+   "id": "streaming",
+   "title": "Direct streaming connection"
+  },
+  {
+   "id": "base",
+   "title": "RTK base"
+  },
+  {
+   "id": "rover",
+   "title": "RTK rover"
+  },
+  {
+   "id": "gnss",
+   "title": "GNSS"
+  }
+ ],
+ "keys": [
+  {
+   "key": "station_mode",
+   "display": "station_mode",
+   "section": "role",
+   "type": "enum",
+   "default": "batch",
+   "roles": {
+    "batch": "optional",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "batch / stream / base / rover. batch logs to the SD card and uploads whole files; stream sends raw GNSS data live over TCP; base streams and emits RTCM3 corrections; rover streams and consumes corrections relayed by the server. When present it is authoritative and operation_mode must agree with it.",
+   "enum": {
+    "batch": "batch",
+    "stream": "stream",
+    "base": "base",
+    "rover": "rover"
+   }
+  },
+  {
+   "key": "operation_mode",
+   "display": "operation_mode",
+   "section": "role",
+   "type": "enum",
+   "default": 0,
+   "roles": {
+    "batch": "optional",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "0 = batch upload, 1 = live TCP stream. Kept in step with station_mode for firmware that predates that key.",
+   "enum": {
+    "0": "batch upload",
+    "1": "live TCP stream"
+   }
+  },
+  {
+   "key": "station",
+   "display": "station",
+   "section": "identity",
+   "type": "string",
+   "default": "XX",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "station name, up to 32 characters, used in every file name",
+   "max_len": 32
+  },
+  {
+   "key": "antenna",
+   "display": "antenna",
+   "section": "identity",
+   "type": "text",
+   "default": "unknown",
+   "roles": {
+    "batch": "optional",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "antenna model, up to 64 characters - written into every log header",
+   "max_len": 64
+  },
+  {
+   "key": "phone_number",
+   "display": "phone_number",
+   "section": "cellular",
+   "type": "string",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "recipient for status and alarm SMS",
+   "max_len": 30
+  },
+  {
+   "key": "phone_number2",
+   "display": "phone_number2",
+   "section": "cellular",
+   "type": "string",
+   "default": "",
+   "roles": {
+    "batch": "optional",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "optional second recipient; switched off by renaming it phone_xnumber2",
+   "max_len": 30,
+   "disabled_spelling": "phone_xnumber2"
+  },
+  {
+   "key": "phone_number3",
+   "display": "phone_number3",
+   "section": "cellular",
+   "type": "string",
+   "default": "",
+   "roles": {
+    "batch": "optional",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "optional third recipient; switched off by renaming it phone_xnumber3",
+   "max_len": 30,
+   "disabled_spelling": "phone_xnumber3"
+  },
+  {
+   "key": "apn",
+   "display": "apn    ",
+   "section": "cellular",
+   "type": "string",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "APN of the SIM card. The padding after the key name is part of the example: some firmware matches the key including its spacing.",
+   "max_len": 30
+  },
+  {
+   "key": "user",
+   "display": "user   ",
+   "section": "cellular",
+   "type": "string",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "APN user",
+   "max_len": 30
+  },
+  {
+   "key": "passwd",
+   "display": "passwd ",
+   "section": "cellular",
+   "type": "secret",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "APN password",
+   "max_len": 30
+  },
+  {
+   "key": "enable_upload",
+   "display": "enable_upload",
+   "section": "upload",
+   "type": "bool01",
+   "default": 1,
+   "roles": {
+    "batch": "mandatory",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "0 = never upload, 1 = upload finished files",
+   "aliases": [
+    "enable_ftp"
+   ]
+  },
+  {
+   "key": "upload_protocol",
+   "display": "upload_protocol",
+   "section": "upload",
+   "type": "enum",
+   "default": 0,
+   "roles": {
+    "batch": "optional",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "0 = FTP, 1 = HTTP",
+   "enum": {
+    "0": "FTP",
+    "1": "HTTP"
+   }
+  },
+  {
+   "key": "server_ftp",
+   "display": "server_ftp",
+   "section": "upload",
+   "type": "host",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "FTP host, used when upload_protocol = 0",
+   "max_len": 30,
+   "group": "ftp"
+  },
+  {
+   "key": "user_ftp",
+   "display": "user_ftp",
+   "section": "upload",
+   "type": "string",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "FTP user",
+   "max_len": 30,
+   "group": "ftp"
+  },
+  {
+   "key": "passwd_ftp",
+   "display": "passwd_ftp",
+   "section": "upload",
+   "type": "secret",
+   "default": "",
+   "roles": {
+    "batch": "mandatory",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "FTP password",
+   "max_len": 30,
+   "group": "ftp"
+  },
+  {
+   "key": "http_server",
+   "display": "http_server",
+   "section": "upload",
+   "type": "host",
+   "default": "",
+   "roles": {
+    "batch": "optional",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "host or IP of the batch server, used when upload_protocol = 1",
+   "max_len": 64,
+   "group": "http"
+  },
+  {
+   "key": "http_port",
+   "display": "http_port",
+   "section": "upload",
+   "type": "int",
+   "default": 8000,
+   "roles": {
+    "batch": "optional",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "port of the batch server",
+   "range": [
+    1,
+    65535
+   ],
+   "group": "http"
+  },
+  {
+   "key": "http_api_key",
+   "display": "http_api_key",
+   "section": "upload",
+   "type": "secret",
+   "default": "",
+   "roles": {
+    "batch": "optional",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "n/a"
+   },
+   "help": "shared secret for the batch server (X-API-Key)",
+   "max_len": 65,
+   "group": "http"
+  },
+  {
+   "key": "streaming_server_ip",
+   "display": "streaming_server_ip",
+   "section": "streaming",
+   "type": "host",
+   "default": "",
+   "roles": {
+    "batch": "n/a",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "address of the streaming server",
+   "max_len": 64
+  },
+  {
+   "key": "streaming_server_port",
+   "display": "streaming_server_port",
+   "section": "streaming",
+   "type": "int",
+   "default": 9000,
+   "roles": {
+    "batch": "n/a",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "TCP port of the streaming server",
+   "range": [
+    1,
+    65535
+   ]
+  },
+  {
+   "key": "streaming_station_id",
+   "display": "streaming_station_id",
+   "section": "streaming",
+   "type": "int",
+   "default": 1001,
+   "roles": {
+    "batch": "n/a",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "station id, unique per server",
+   "range": [
+    1,
+    65535
+   ]
+  },
+  {
+   "key": "streaming_heartbeat_interval",
+   "display": "streaming_heartbeat_interval",
+   "section": "streaming",
+   "type": "int",
+   "default": 30,
+   "roles": {
+    "batch": "n/a",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "seconds between heartbeats; must stay below the server's idle timeout",
+   "unit": "s",
+   "range": [
+    5,
+    120
+   ]
+  },
+  {
+   "key": "streaming_cli_secret",
+   "display": "streaming_cli_secret",
+   "section": "streaming",
+   "type": "secret",
+   "default": "",
+   "roles": {
+    "batch": "n/a",
+    "stream": "optional",
+    "base": "optional",
+    "rover": "optional"
+   },
+   "help": "token required for remote CLI commands; empty accepts them without a token. The field holds max_len bytes including its terminator.",
+   "max_len": 32
+  },
+  {
+   "key": "base_mode",
+   "display": "base_mode",
+   "section": "base",
+   "type": "enum",
+   "default": "survey_in",
+   "roles": {
+    "batch": "n/a",
+    "stream": "n/a",
+    "base": "optional",
+    "rover": "n/a"
+   },
+   "help": "survey_in or fixed",
+   "enum": {
+    "survey_in": "survey its own position",
+    "fixed": "known position"
+   }
+  },
+  {
+   "key": "survey_in_min_dur",
+   "display": "survey_in_min_dur",
+   "section": "base",
+   "type": "int",
+   "default": 300,
+   "roles": {
+    "batch": "n/a",
+    "stream": "n/a",
+    "base": "optional",
+    "rover": "n/a"
+   },
+   "help": "minimum survey-in duration in seconds (survey_in only)",
+   "unit": "s",
+   "range": [
+    60,
+    86400
+   ]
+  },
+  {
+   "key": "rtcm_client",
+   "display": "rtcm_client",
+   "section": "rover",
+   "type": "bool01",
+   "default": 0,
+   "roles": {
+    "batch": "n/a",
+    "stream": "n/a",
+    "base": "n/a",
+    "rover": "optional"
+   },
+   "help": "1 = accept RTCM3 corrections relayed by the server"
+  },
+  {
+   "key": "sampling_interval",
+   "display": "sampling_interval",
+   "section": "gnss",
+   "type": "enum",
+   "default": 3,
+   "roles": {
+    "batch": "mandatory",
+    "stream": "mandatory",
+    "base": "mandatory",
+    "rover": "mandatory"
+   },
+   "help": "1-based index, not a rate: 1 = 0.25 s, 2 = 0.5 s, 3 = 1 s, 4 = 5 s",
+   "enum": {
+    "1": "0.25 s (4 Hz)",
+    "2": "0.5 s (2 Hz)",
+    "3": "1 s",
+    "4": "5 s"
+   }
+  }
+ ],
+ "obsolete_keys": [
+  {
+   "key": "legacy_upload_mode",
+   "removed_fw": "example-0.9",
+   "note": "An example of a key the firmware no longer reads. Delete the line."
+  }
+ ],
+ "device_name": "Example device"
+}

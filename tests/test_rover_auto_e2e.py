@@ -21,9 +21,8 @@ from .helpers import ident, rtcm3, rtcm3_1005
 
 BASE = 1001
 ROVER = 1010
-# An arbitrary real-world reference point - base ARP and rover fix at (almost)
-# the same spot, so the baseline is small and well inside any reasonable
-# max-baseline.
+# A reference point - base ARP and rover fix at (almost) the same spot,
+# so the baseline is small and well inside any reasonable max-baseline.
 BASE_ECEF = (4278387.4699, 635620.7099, 4672340.0400)
 ROVER_LAT, ROVER_LON, ROVER_HEIGHT_MM = 47.400298, 8.450366, 459400
 

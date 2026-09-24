@@ -7,12 +7,11 @@ into one comparable distance: the baseline.
 No pyproj: the closed-form lat/lon/height -> ECEF conversion is exact (not an
 iteration - that direction only needs one) and is standard geodesy, not a
 protocol detail worth a dependency. It mirrors the ECEF -> lat/lon iteration
-run the other way.
+used for the reverse direction elsewhere, just run the other way.
 
 THE UNIT TRAP THIS FILE EXISTS TO AVOID
 ----------------------------------------
-u-blox survey-in sensor fields have already caught people out this way
-(`meanAcc` 0.1 mm, `meanX/Y/Z` cm) - the same class of mistake. NAV-PVT has
+u-blox has more of these: the survey-in fields scale differently again (`meanAcc` 0.1 mm, `meanX/Y/Z` cm). NAV-PVT has
 its own: pyubx2 scales `lat`/`lon` to degrees (its scale table carries 1e-07 for
 both), but leaves `height`/`hMSL` **unscaled** - they arrive as raw millimetres
 (u-blox int32). Passing that straight into the formula below without /1000

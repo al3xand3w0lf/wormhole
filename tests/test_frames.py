@@ -46,7 +46,8 @@ def test_ident():
                                   ROLE_STREAM, ROLE_ROVER_NTRIP])
 def test_ident_role_byte(role):
     """The role byte a firmware that supports auto-discovery sends - see the
-    module docstring for how each of these gets chosen on the device side."""
+    role mapping in streaming/frames.py for how each of these gets chosen on
+    the device side."""
     msg = decode_private(ident(1001, role))
     assert msg == Ident(1001, role)
 
@@ -93,7 +94,7 @@ def test_sensor_decode(msg_id, fmt, stream, values):
 
 
 def test_internal_and_external_are_distinguishable():
-    """Internal and external sensors must not collide on the server."""
+    """Internal and external sensors must not collide."""
     a = decode_private(sensor(ID_SENSOR_INA219, "<Iiii", 1, 1, 2, 3))
     b = decode_private(sensor(ID_SENSOR_INA219_EXT, "<Iiii", 1, 1, 2, 3))
     assert a.stream != b.stream
@@ -113,11 +114,11 @@ def test_nmea_gga_decodes_verbatim():
     assert msg.text == GGA_FIXED
 
 
-# A REAL sentence off a rover receiver with high-precision NMEA enabled (u-blox
-# CFG-NMEA-HIGHPREC): 7 decimals of minutes and 3 for altitude, which takes the
-# line to 88 characters - past the NMEA-0183 cap of 82 that the receiver breaks
-# on purpose (its interface description forbids combining high precision with
-# the 82-character limit mode for exactly this reason).
+# A REAL sentence off a bench rover (RTK FIXED):
+# CFG-NMEA-HIGHPREC gives 7 decimals of minutes and 3 for altitude, which takes
+# the line to 88 characters - past the NMEA-0183 cap of 82 that u-blox breaks on
+# purpose here (the interface description forbids combining HIGHPREC with
+# LIMIT82 for exactly this reason).
 GGA_HIGHPREC = (
     "$GNGGA,064416.00,4724.4986963,N,00830.3503494,E,4,12,0.54,"
     "526.634,M,47.343,M,1.0,1001*61"
@@ -189,7 +190,6 @@ class TestCmdRequest:
             encode_cmd_request("whoami", "x" * 256)
 
 
-
 def test_ident_carries_the_station_name():
     """FW 1.69.x appends [name_len][station_name] after the reserved bytes. The
     name is what the batch-mode file names were built from ("A001"), and it is
@@ -220,3 +220,95 @@ def test_ident_name_length_longer_than_the_payload_is_truncated_not_fatal():
     raw = build_ubx(PRIVATE_CLASS, ID_IDENT,
                     struct.pack("<IB3xB", 2001, ROLE_BASE, 99) + b"A001")
     assert decode_private(raw) == Ident(2001, ROLE_BASE, "A001")
+
+# --- WN90LP weather sensor (0x13) -------------------------------------------
+
+
+def _wn90lp_frame(rtc, values):
+    from streaming.frames import (ID_SENSOR_WN90LP, PRIVATE_CLASS, SENSOR_SPECS,
+                                  build_ubx)
+    _stream, fmt, names = SENSOR_SPECS[ID_SENSOR_WN90LP]
+    payload = struct.pack(fmt, rtc, *[values[n] for n in names])
+    return build_ubx(PRIVATE_CLASS, ID_SENSOR_WN90LP, payload)
+
+
+def test_wn90lp_roundtrip():
+    from streaming.frames import ID_SENSOR_WN90LP, SENSOR_SPECS, decode_private
+    _stream, _fmt, names = SENSOR_SPECS[ID_SENSOR_WN90LP]
+    values = {n: (i + 1) * 100 for i, n in enumerate(names)}
+    reading = decode_private(_wn90lp_frame(1788480011, values))
+    assert reading.stream == "wn90lp"
+    assert reading.rtc_unix == 1788480011
+    assert reading.values == values
+
+
+def test_wn90lp_payload_is_56_bytes():
+    """4 bytes rtc_unix plus thirteen int32 fields. A change here is a
+    wire-format change and needs the producer and any firmware to move in
+    step."""
+    from streaming.frames import SENSOR_SPECS, ID_SENSOR_WN90LP
+    _stream, fmt, names = SENSOR_SPECS[ID_SENSOR_WN90LP]
+    assert struct.calcsize(fmt) == 56
+    assert len(names) == 13
+
+
+def test_wn90lp_carries_provenance():
+    """`source` distinguishes a sample the producer took from a per-minute
+    value recovered out of the sensor's history.
+
+    Without it the two are indistinguishable in the archive, and they are not
+    the same quantity: in the history block wind is a per-minute MEAN and gust
+    a per-minute MAXIMUM, against instantaneous readings in a live row. A gust
+    statistic computed across both would be wrong in a way nothing flags.
+    """
+    from streaming.frames import ID_SENSOR_WN90LP, SENSOR_SPECS, decode_private
+    _stream, _fmt, names = SENSOR_SPECS[ID_SENSOR_WN90LP]
+    assert names[0] == "source", "provenance leads the row, as in the producer CSV"
+    for code in (0, 1):
+        values = dict.fromkeys(names, 0)
+        values["source"] = code
+        reading = decode_private(_wn90lp_frame(1788480011, values))
+        assert reading.values["source"] == code
+
+
+def test_wn90lp_unknown_provenance_is_not_silently_live():
+    """A producer that does not say must not be recorded as having said 0."""
+    from streaming.frames import ID_SENSOR_WN90LP, SENSOR_SPECS, decode_private
+    _stream, _fmt, names = SENSOR_SPECS[ID_SENSOR_WN90LP]
+    values = dict.fromkeys(names, 0)
+    values["source"] = -2147483648
+    reading = decode_private(_wn90lp_frame(1788480011, values))
+    assert reading.values["source"] == -2147483648
+
+
+def test_wn90lp_keeps_the_invalid_sentinel():
+    """INT32_MIN means "no reading" and must survive decoding untouched.
+
+    Substituting 0 anywhere on this path turns a missing wind sample into
+    recorded calm and a missing pressure into 0 hPa - a plausible-looking
+    measurement that never happened.
+    """
+    from streaming.frames import ID_SENSOR_WN90LP, SENSOR_SPECS, decode_private
+    _stream, _fmt, names = SENSOR_SPECS[ID_SENSOR_WN90LP]
+    values = dict.fromkeys(names, -2147483648)
+    values["temp_mC"] = 23500                      # one real reading among them
+    reading = decode_private(_wn90lp_frame(1788480011, values))
+    assert reading.values["wind_mms"] == -2147483648
+    assert reading.values["press_Pa"] == -2147483648
+    assert reading.values["temp_mC"] == 23500
+
+
+def test_wn90lp_short_payload_is_rejected():
+    from streaming.frames import (ID_SENSOR_WN90LP, PRIVATE_CLASS, build_ubx,
+                                  decode_private)
+    stumpf = build_ubx(PRIVATE_CLASS, ID_SENSOR_WN90LP, bytes(55))
+    assert decode_private(stumpf) is None
+
+
+def test_wn90lp_id_does_not_collide():
+    from streaming.frames import (ID_SENSOR_WN90LP, ID_NMEA_GGA, ID_RTCM_INFO,
+                                  SENSOR_SPECS)
+    assert ID_SENSOR_WN90LP == 0x13
+    assert ID_SENSOR_WN90LP not in (ID_NMEA_GGA, ID_RTCM_INFO)
+    ids = list(SENSOR_SPECS)
+    assert len(ids) == len(set(ids))

@@ -57,7 +57,7 @@ Filtering therefore happens before the frame is queued. Doing it in
 on overflow, so ballast that is thrown away at the far end has already evicted a
 real correction on its way through.
 
-Measured on the reference deployment: the
+Measured on a real base/rover pair: the
 caster offers ~1730 B/s, the device drains ~1416 B/s, and the receiver reports
 `RXM-RTCM msgUsed=1` — "not used" — for every 1137 (NavIC) it is sent. The result
 was a rover that received 23 % of its epochs with no correction at all, one gap
@@ -199,9 +199,9 @@ class RoverRouter:
     The rover set is mutable at runtime (`add_rover()` / `remove_rover()`) so a
     station can be subscribed or dropped without a process restart — either by
     an operator (`POST/DELETE /stream/rover/subscribe`) or by
-    `rover_discovery.RoverAutoDiscovery` picking a nearest base. All mutation
-    happens on the event loop that also runs `publish()` and the senders, and
-    none of it crosses an `await`, so there is no lock: a running `for sid in
+    `rover_discovery.RoverAutoDiscovery` picking a nearest base. All mutation happens on
+    the event loop that also runs `publish()` and the senders, and none of it
+    crosses an `await`, so there is no lock: a running `for sid in
     self.station_ids` loop in `publish()` cannot be interleaved with a set
     mutation from a different coroutine.
     """

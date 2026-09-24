@@ -2,3 +2,7 @@
 
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
+
+# starlette's TestClient runs the ASGI app in-process; it falls back to
+# plain httpx when httpx2 is absent. Needed by tests/test_configgen.py.
+httpx>=0.27.0

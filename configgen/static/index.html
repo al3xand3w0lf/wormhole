@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device configuration generator</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1d1c1a; --muted: #6b6862; --line: #e0ddd7;
+    --card: #fff; --accent: #2f6f4f; --err: #a3312a; --warn: #8a5a12;
+    --info: #3c5a80; --code: #f2f0ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #191817; --fg: #e9e6e0; --muted: #9c968c; --line: #35322e;
+      --card: #211f1d; --accent: #6fbf92; --err: #e08078; --warn: #d8a441;
+      --info: #8fb2dc; --code: #26241f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { border-bottom: 1px solid var(--line); padding: 18px 24px;
+           background: var(--card); position: sticky; top: 0; z-index: 5; }
+  h1 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px; }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 10px; padding: 18px 20px; margin-bottom: 18px; }
+  h2 { font-size: 14px; margin: 0 0 12px; text-transform: uppercase;
+       letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  .roles { display: flex; flex-wrap: wrap; gap: 8px; }
+  .role { border: 1px solid var(--line); background: transparent; color: inherit;
+          border-radius: 8px; padding: 9px 14px; cursor: pointer; font: inherit; }
+  .role[aria-pressed="true"] { border-color: var(--accent); color: var(--accent);
+          box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+  section.sec { border-top: 1px solid var(--line); padding-top: 14px;
+                margin-top: 14px; }
+  section.sec:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+  .sec h3 { font-size: 14px; margin: 0 0 10px; }
+  .field { display: grid; grid-template-columns: 260px 1fr; gap: 12px;
+           align-items: start; padding: 7px 0; }
+  @media (max-width: 720px) { .field { grid-template-columns: 1fr; } }
+  label { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 13px; padding-top: 6px; word-break: break-all; }
+  label .req { color: var(--err); margin-left: 4px; }
+  label .na { color: var(--muted); font-weight: 400; }
+  input, select { width: 100%; padding: 7px 9px; font: inherit; font-size: 14px;
+          background: var(--bg); color: var(--fg);
+          border: 1px solid var(--line); border-radius: 6px; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .hint { grid-column: 2; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  @media (max-width: 720px) { .hint { grid-column: 1; } }
+  .meta { color: var(--muted); font-size: 12px; }
+  button.act { font: inherit; font-weight: 560; padding: 9px 16px; cursor: pointer;
+          border-radius: 8px; border: 1px solid var(--accent);
+          background: var(--accent); color: #fff; }
+  button.ghost { background: transparent; color: inherit; border-color: var(--line); }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .f { border-left: 3px solid var(--line); padding: 7px 12px; margin: 7px 0;
+       background: var(--code); border-radius: 0 6px 6px 0; font-size: 13.5px; }
+  .f.error { border-color: var(--err); }
+  .f.warning { border-color: var(--warn); }
+  .f.info { border-color: var(--info); }
+  .f code { font-weight: 600; }
+  pre { background: var(--code); padding: 14px; border-radius: 8px;
+        overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
+  details { margin: 6px 0; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px;
+            font-size: 13.5px; }
+  .banner.ok { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .banner.bad { background: color-mix(in srgb, var(--err) 14%, transparent); }
+  .banner.note { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  #drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 16px;
+          text-align: center; color: var(--muted); font-size: 13.5px; }
+  #drop.over { border-color: var(--accent); color: var(--accent); }
+  .idx { columns: 2; column-gap: 28px; font-size: 13px; }
+  @media (max-width: 720px) { .idx { columns: 1; } }
+  .idx div { break-inside: avoid; margin-bottom: 9px; }
+  .idx b { font-family: ui-monospace, monospace; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Device configuration generator</h1>
+  <div class="sub" id="subtitle">loading…</div>
+</header>
+
+<main>
+  <div id="prefillNote"></div>
+
+  <div class="card">
+    <h2>1 · Role</h2>
+    <div class="roles" id="roles"></div>
+    <p class="meta" id="roleHelp" style="margin:12px 0 0"></p>
+  </div>
+
+  <div class="card">
+    <h2>Start from an existing file</h2>
+    <div id="drop">Drop a CONFIG.TXT here, or <label style="text-decoration:underline;cursor:pointer;padding:0;font-family:inherit;font-size:inherit">choose a file<input type="file" id="file" hidden></label>.
+      Values are read the way the device reads them; the file is rendered fresh from the template.</div>
+    <div id="importFindings"></div>
+  </div>
+
+  <form id="form" hidden>
+    <div class="card">
+      <h2>2 · Settings</h2>
+      <p class="meta" style="margin:-4px 0 12px">
+        <label style="font-family:inherit;font-size:inherit;padding:0;cursor:pointer">
+          <input type="checkbox" id="showAll" style="width:auto;margin-right:6px">
+          also show the keys that have no effect in this role
+        </label>
+      </p>
+      <div id="fields"></div>
+    </div>
+
+    <div class="card">
+      <h2>3 · Generate</h2>
+      <div class="bar">
+        <button class="act" type="button" id="gen">Check and preview</button>
+        <button class="ghost act" type="button" id="dl">Download CONFIG.TXT</button>
+        <span class="meta" id="genMeta"></span>
+      </div>
+      <div id="genFindings"></div>
+      <pre id="preview" hidden></pre>
+    </div>
+  </form>
+
+  <div class="card">
+    <h2>Reference — every key</h2>
+    <details><summary>Show all keys and what they do</summary>
+      <div class="idx" id="index"></div>
+    </details>
+  </div>
+</main>
+
+<script>
+"use strict";
+let SCHEMA = null, ROLE = null, VALUES = {};
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let d; try { d = (await r.json()).detail; } catch (e) { d = r.statusText; }
+    throw new Error(typeof d === "string" ? d : JSON.stringify(d));
+  }
+  return r.json();
+}
+
+function findingsHtml(list) {
+  if (!list || !list.length) return "";
+  const order = { error: 0, warning: 1, info: 2 };
+  return list.slice().sort((a, b) => order[a.level] - order[b.level]).map(f =>
+    `<div class="f ${f.level}">${f.key ? `<code>${esc(f.key)}</code> — ` : ""}${esc(f.message)}</div>`
+  ).join("");
+}
+
+function fieldRow(k) {
+  const state = k.roles[ROLE];
+  const v = VALUES[k.key] === undefined ? "" : VALUES[k.key];
+  let input;
+  if (k.enum) {
+    const opts = Object.entries(k.enum).map(([val, lab]) =>
+      `<option value="${esc(val)}"${String(v) === val ? " selected" : ""}>${esc(val)} — ${esc(lab)}</option>`).join("");
+    input = `<select name="${esc(k.key)}"><option value="">(not set)</option>${opts}</select>`;
+  } else {
+    // Everything is shown in clear text, secrets included. Masking them here
+    // protected nothing - the value is in the preview, in the downloaded file
+    // and on the SD card in clear text anyway - while making it impossible to
+    // check a token by eye, which is the one thing an operator actually does.
+    // The page is reachable only over an SSH tunnel to loopback; that is the
+    // boundary, not a row of dots.
+    const extra = k.max_len ? ` maxlength="${k.max_len}"` : "";
+    input = `<input type="text" name="${esc(k.key)}" value="${esc(v)}"${extra}
+             autocomplete="off" spellcheck="false">`;
+  }
+  const unit = k.unit ? ` <span class="meta">(${esc(k.unit)})</span>` : "";
+  const range = k.range ? ` <span class="meta">${k.range[0]}…${k.range[1]}</span>` : "";
+  const mark = state === "mandatory" ? '<span class="req" title="required in this role">*</span>'
+    : state === "n/a" ? ' <span class="na">· no effect here</span>' : "";
+  return `<div class="field">
+      <label for="${esc(k.key)}">${esc(k.key)}${mark}</label>
+      <div>${input}${unit}${range}
+        ${k.help ? `<details><summary>what this does</summary><div class="hint">${esc(k.help)}</div></details>` : ""}
+      </div>
+    </div>`;
+}
+
+// A section may split into alternatives that one key chooses between - the
+// upload target is FTP or HTTP. The chosen one is shown; the other is folded
+// away rather than removed, because "not selected" and "not needed" are not the
+// same thing here: the firmware decides whether the FTP keys are mandatory from
+// the ROLE alone, so a station uploading over HTTP still has to carry them or it
+// loses its persistent config backup. The fold says so.
+function sectionBody(section, keys) {
+  const choice = section.choice;
+  if (!choice) return keys.map(fieldRow).join("");
+
+  const selected = String(VALUES[choice.key] === undefined ? "" : VALUES[choice.key]);
+  const active = choice.groups[selected];
+  const plain = keys.filter(k => !k.group);
+  const groups = {};
+  keys.filter(k => k.group).forEach(k => (groups[k.group] = groups[k.group] || []).push(k));
+
+  let html = plain.map(fieldRow).join("");
+  Object.keys(groups).forEach(g => {
+    const label = (choice.labels && choice.labels[g]) || g;
+    const rows = groups[g].map(fieldRow).join("");
+    if (g === active || active === undefined) {
+      html += `<h4 style="font-size:13px;margin:16px 0 6px;color:var(--muted)">${esc(label)}${
+        g === active ? " — selected" : ""}</h4>${rows}`;
+    } else {
+      html += `<details style="margin:14px 0 4px">
+          <summary>${esc(label)} — not selected${
+            choice.keep_inactive ? ", but " + esc(choice.inactive_note || "") : ""}</summary>
+          ${rows}</details>`;
+    }
+  });
+  return html;
+}
+
+function renderFields() {
+  const titles = {};
+  SCHEMA.sections.forEach(s => titles[s.id] = s.title);
+  const showAll = $("#showAll").checked;
+  const bySection = {};
+  SCHEMA.keys.forEach(k => {
+    // A key that does nothing in this role is hidden by default so the form
+    // stays about the station being built - but never unreachable: the toggle
+    // above brings all 81 back, because "you cannot see it" is a bad reason
+    // for a field not to exist.
+    if (k.roles[ROLE] === "n/a" && !showAll
+        && !(k.key in VALUES && VALUES[k.key] !== "")) return;
+    (bySection[k.section] = bySection[k.section] || []).push(k);
+  });
+  $("#fields").innerHTML = SCHEMA.sections
+    .filter(s => bySection[s.id])
+    .map(s => `<section class="sec"><h3>${esc(s.title)}</h3>${sectionBody(s, bySection[s.id])}</section>`)
+    .join("");
+  $("#form").hidden = false;
+  $("#fields").oninput = (e) => { VALUES[e.target.name] = e.target.value; };
+  $("#fields").onchange = (e) => {
+    VALUES[e.target.name] = e.target.value;
+    // Changing the key a section branches on re-draws the form, so the fold
+    // follows the choice instead of going stale.
+    if (SCHEMA.sections.some(s => s.choice && s.choice.key === e.target.name)) {
+      renderFields();
+    }
+  };
+}
+
+async function pickRole(role) {
+  ROLE = role;
+  document.querySelectorAll(".role").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.role === role)));
+  const d = await api(`/config/defaults/${encodeURIComponent(role)}`);
+  VALUES = d.values;
+  renderFields();
+  $("#roleHelp").textContent =
+    `${SCHEMA.keys.filter(k => k.roles[role] === "mandatory").length} keys are required in this role; ` +
+    `a missing one costs the station its persistent backup copy of the configuration.`;
+}
+
+async function generate(preview) {
+  const body = JSON.stringify({ role: ROLE, values: VALUES });
+  const res = await api("/config/generate", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body });
+  $("#genFindings").innerHTML =
+    `<div class="banner ${res.ok ? "ok" : "bad"}">${res.ok
+      ? "No errors. The file is safe to put on the card."
+      : "There are errors — fix them before using this file."}</div>` +
+    findingsHtml(res.findings);
+  if (preview) { $("#preview").hidden = false; $("#preview").textContent = res.file; }
+  return res;
+}
+
+async function download() {
+  const res = await generate(false);
+  if (!res.ok) return;
+  const blob = new Blob([res.file], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "CONFIG.TXT";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $("#genMeta").textContent = "downloaded";
+}
+
+async function importFile(text) {
+  const res = await api("/config/import", {
+    method: "POST", headers: { "Content-Type": "text/plain" }, body: text });
+  ROLE = res.role;
+  document.querySelectorAll(".role").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.role === res.role)));
+  const d = await api(`/config/defaults/${encodeURIComponent(res.role)}`);
+  VALUES = Object.assign({}, d.values, res.values);
+  renderFields();
+  $("#importFindings").innerHTML =
+    `<div class="banner note">Imported as role <b>${esc(res.role)}</b>. ` +
+    `${Object.keys(res.values).length} values read.</div>` + findingsHtml(res.findings);
+}
+
+(async function init() {
+  SCHEMA = await api("/config/schema");
+  $("#title").textContent = `${SCHEMA.device} configuration generator`;
+  $("#subtitle").textContent =
+    `schema for firmware ${SCHEMA.firmware} · ${SCHEMA.keys.length} keys · ${SCHEMA.roles.length} roles`;
+
+  $("#roles").innerHTML = SCHEMA.roles.map(r =>
+    `<button type="button" class="role" data-role="${esc(r)}" aria-pressed="false">${esc(r)}</button>`).join("");
+  document.querySelectorAll(".role").forEach(b =>
+    b.onclick = () => pickRole(b.dataset.role));
+
+  const pf = await api("/config/prefill");
+  if (pf.note) $("#prefillNote").innerHTML = `<div class="banner note">${esc(pf.note)}</div>`;
+
+  $("#index").innerHTML = SCHEMA.keys.map(k =>
+    `<div><b>${esc(k.key)}</b> <span class="meta">${esc(k.type)}${k.unit ? ", " + esc(k.unit) : ""}</span><br>${esc(k.help || "")}</div>`).join("") +
+    (SCHEMA.obsolete || []).map(o =>
+    `<div><b>${esc(o.key)}</b> <span class="meta">obsolete${o.removed_fw ? " since " + esc(o.removed_fw) : ""}</span><br>${esc(o.note || "")}</div>`).join("");
+
+  $("#showAll").onchange = () => { if (ROLE) renderFields(); };
+  $("#gen").onclick = () => generate(true);
+  $("#dl").onclick = download;
+
+  const drop = $("#drop");
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", async e => {
+    e.preventDefault(); drop.classList.remove("over");
+    const f = e.dataTransfer.files[0];
+    if (f) importFile(await f.text());
+  });
+  $("#file").onchange = async e => {
+    const f = e.target.files[0];
+    if (f) importFile(await f.text());
+  };
+})().catch(e => {
+  document.querySelector("main").innerHTML =
+    `<div class="card"><div class="banner bad">${esc(e.message)}</div></div>`;
+});
+</script>
+</body>
+</html>

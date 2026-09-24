@@ -5,11 +5,11 @@ Emulates a device in streaming mode: connects, sends IDENT, then
 streams UBX-RXM-RAWX + RTCM3 + sensor frames. It also answers CMD_REQUEST frames,
 so the whole CLI control plane can be exercised end to end.
 
-A download-class command is served the way a real device does it: FILE_REQUEST,
+A download-class command is served the way the firmware does it: FILE_REQUEST,
 then FILE_BEGIN, then exactly `total` RAW bytes off the same socket, CRC32
-checked. `--legacy-download` replays the old dance instead (ack -> disconnect
--> reconnect -> deferred answer), which is what a device with
-`streaming_file_transfer = 0` still does.
+checked. `--legacy-download` replays the old dance
+instead (ack -> disconnect -> reconnect -> deferred answer), which is what a
+device with `streaming_file_transfer = 0` still does.
 
 Usage:
     python fake_device.py                       # localhost:9000, station 1001
@@ -67,7 +67,7 @@ from streaming.frames import (
     ubx_payload,
 )
 from streaming.framer import StreamFramer
-from streaming.frames import ID_CMD_REQUEST
+from streaming.frames import ID_CMD_REQUEST, ID_GNSS_TUNNEL_DOWN, ID_GNSS_TUNNEL_UP
 
 ROLE_NAMES = {"unset": ROLE_UNSET, "base": ROLE_BASE, "rover": ROLE_ROVER,
               "logger": ROLE_LOGGER, "stream": ROLE_STREAM}
@@ -76,7 +76,7 @@ GPS_EPOCH = datetime(1980, 1, 6, tzinfo=timezone.utc)
 # A real receiver reports GPS time, which currently runs 18 s ahead of UTC. The
 # firmware never corrects for it, so its RTC (and hence rtc_unix) is GPS time too.
 GPS_LEAP_S = 18
-ALLOWLIST = ("whoami", "sysinfo", "listfiles", "download", "downloadcf", "downloadfw",
+ALLOWLIST = ("whoami", "sysinfo", "listfiles", "gnssbridge", "download", "downloadcf", "downloadfw",
              "upload", "reboot", "fsdcard")
 
 # Payload bytes per FILE_UP_DATA frame — mirrors STREAMING_FILE_UP_CHUNK.
@@ -170,8 +170,8 @@ def find_file_begin(buf: bytes):
 def target_files(cmd: str) -> list[str]:
     """Which server-side file(s) a download command asks for.
 
-    Mirrors the firmware: downloadcf probes lowercase before uppercase,
-    downloadfw asks for the encrypted image.
+    Mirrors the reference firmware: downloadcf probes lowercase before
+    uppercase, downloadfw asks for the encrypted image.
     """
     if cmd.startswith("downloadcf"):
         return ["config.txt", "CONFIG.TXT"]
@@ -313,11 +313,52 @@ def handle_command(payload: bytes, secret: str) -> tuple[str, str]:
         return cmd, "download"
     if cmd.startswith("upload"):
         return cmd, "upload"
+    if cmd.startswith("gnssbridge"):
+        return cmd, "gnssbridge"
     if cmd == "whoami":
         return "streaming station (fake device)\r\n", ""
     if cmd == "sysinfo":
         return "FW 1.51.2\r\nBL 1.8.0\r\nmode: streaming\r\n", ""
     return f"{cmd}: ok\r\n", ""
+
+
+# --- GNSS maintenance tunnel (K-01 Etappe 2) -------------------------------
+# The emulation is deliberately an ECHO, not a receiver model. What has to be
+# proven without hardware is that the pipe is transparent and lossless end to
+# end; a fake that answered like a ZED would only test the fake. An echo makes
+# the operator's own tool the oracle: whatever it sent must come back byte for
+# byte.
+_tunnel_open = False
+_tunnel_down_bytes = 0
+_tunnel_up_bytes = 0
+
+
+def gnssbridge_reply(cmd: str) -> str:
+    """Mirror the firmware's gnssbridge sub-commands closely enough to drive the
+    server's open/close flow."""
+    global _tunnel_open, _tunnel_down_bytes, _tunnel_up_bytes
+    parts = cmd.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "status":
+        return (f"bridge: {'ACTIVE' if _tunnel_open else 'idle'} via socket "
+                f"baud=921600 idle=1800s elapsed=0s\r\n"
+                f"        toGnss={_tunnel_down_bytes} B toPc={_tunnel_up_bytes} B "
+                f"txFail=0 pcDrop=0\r\n"
+                f"        tunDrop=0  (MUST be 0 - a lost byte is a bricked receiver)\r\n")
+    if sub == "stop":
+        if not _tunnel_open:
+            return "no bridge session is running\r\n"
+        _tunnel_open = False
+        return "stop requested - the session ends within a second\r\n"
+
+    _tunnel_open = True
+    _tunnel_down_bytes = 0
+    _tunnel_up_bytes = 0
+    if sub == "rescue":
+        return ("rescue: power-cycling the receiver, then a SILENT tunnel.\r\n"
+                "Nothing is sent from here.\r\n")
+    return "starting bridge...\r\n"
 
 
 def run(host: str, port: int, station: int, secret: str, duration: float,
@@ -382,7 +423,15 @@ def run(host: str, port: int, station: int, secret: str, duration: float,
 
             # Poll for inbound CMD_REQUEST
             try:
-                data = sock.recv(4096)
+                # ⚠ While a tunnel is open, drain HARD and do not sleep below.
+                # The 4096-bytes-then-sleep(1) rhythm of the ordinary loop caps
+                # this socket at 4 kB/s, which is not a property of the tunnel
+                # but of this emulator - measured exactly that way on
+                # 2026-09-16 while looking for a server-side bottleneck that did
+                # not exist. The real firmware services its bridge every 1 ms.
+                if _tunnel_open:
+                    sock.settimeout(0.02)
+                data = sock.recv(65536 if _tunnel_open else 4096)
                 if not data:
                     break
                 for frame in framer.feed(data):
@@ -414,10 +463,28 @@ def run(host: str, port: int, station: int, secret: str, duration: float,
                             print(f"<- RTCM_INFO base_id={base_id}")
                         continue
 
+                    if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_GNSS_TUNNEL_DOWN:
+                        payload = ubx_payload(frame.raw)
+                        global _tunnel_down_bytes, _tunnel_up_bytes
+                        _tunnel_down_bytes += len(payload)
+                        if _tunnel_open:
+                            # Echo it straight back up. No chunking games: the
+                            # envelope the server sent already respects the
+                            # device's reassembly ceiling, so the same size is
+                            # always legal in the other direction.
+                            sock.sendall(build_ubx(PRIVATE_CLASS, ID_GNSS_TUNNEL_UP, payload))
+                            _tunnel_up_bytes += len(payload)
+                        continue
+
                     if frame.cls_ != PRIVATE_CLASS or frame.id_ != ID_CMD_REQUEST:
                         continue
                     payload = ubx_payload(frame.raw)
                     text, kind = handle_command(payload, secret)
+                    if kind == "gnssbridge":
+                        reply = gnssbridge_reply(text)
+                        print(f"<- CMD {text!r} -> {reply.splitlines()[0]}")
+                        sock.sendall(cli_response(reply, True))
+                        continue
                     if kind == "upload":
                         parts = text.split(None, 1)
                         target = parts[1].strip() if len(parts) > 1 else "CONFIG.TXT"
@@ -449,8 +516,12 @@ def run(host: str, port: int, station: int, secret: str, duration: float,
                     sock.sendall(cli_response(text, True))
             except socket.timeout:
                 pass
+            finally:
+                if _tunnel_open:
+                    sock.settimeout(0.5)
 
-            time.sleep(1.0)
+            if not _tunnel_open:
+                time.sleep(1.0)
 
         sock.close()
         if reconnect:
@@ -473,7 +544,7 @@ def main() -> int:
     p.add_argument("--legacy-download", action="store_true",
                    help="replay the pre-B1 download dance (disconnect + deferred answer)")
     p.add_argument("--role", choices=sorted(ROLE_NAMES), default="unset",
-                   help="IDENT role byte, for exercising rover auto-discovery. "
+                   help="IDENT role byte. "
                         "'rover' also needs --rover-fix to be useful.")
     p.add_argument("--rover-fix", metavar="LAT,LON,HEIGHT_M", default=None,
                    help="3D fix to report every second when --role rover, e.g. "
@@ -494,6 +565,7 @@ def main() -> int:
         print("--role rover with no --rover-fix: IDENT only, holds forever "
               "(RoverAutoDiscovery's hold-for-a-fix policy) unless it is the only known base.",
               file=sys.stderr)
+
 
     try:
         return run(args.host, args.port, args.station, args.secret, args.duration,

@@ -17,9 +17,9 @@ sensor CSVs carry it as a separate column).
       conventions and would silently diverge from the device by the leap seconds.
       pyubx2 supplies the raw RXM-RAWX fields; the conversion below is ours.
 
-  ==> If YOUR device already corrects for leap seconds, this module is the single
-      place to change (subtract `leapS` in `gps_to_datetime`). tests/test_gpstime.py
-      pins the current behaviour, so it will tell you what you changed.
+  ==> Touching ublox_getGpsTime() in the firmware breaks this server. The two are a
+      contract; tests/test_gpstime.py is a literal port of that function and will
+      fail if they diverge.
 """
 
 import math

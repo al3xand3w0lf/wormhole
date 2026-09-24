@@ -162,9 +162,9 @@ Millipede's own sourcetable-driven feature; see its own
 
 **With only one real base this is a harmless no-op** — there is nothing to be
 "nearer" than — and starts actually selecting the moment a second station gets
-its own decoded position. See `docs/millipede-near-base-2026-08-28.md` for the
-current state of this deployment and the rover-side `config.txt` block
-(`ntrip_mountpoint = NEAR`, `ntrip_send_gga = 1`).
+its own decoded position. On the rover side this needs a client that sends its
+GGA position to the caster (for a device configuration, e.g.
+`ntrip_mountpoint = NEAR`, `ntrip_send_gga = 1`).
 
 ## Not set up here
 

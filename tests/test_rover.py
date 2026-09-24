@@ -250,7 +250,7 @@ class _Session:
 
 def test_send_takes_the_write_lock():
     """Without it, an envelope lands inside a file transfer's raw byte stream -
-    the same splice hazard as the download direction, just reversed."""
+    the same splice hazard as a torn uplink frame, in the other direction."""
     session = _Session()
     router = RoverRouter(_Registry({1001: session}), {1001}, queue_len=4)
 

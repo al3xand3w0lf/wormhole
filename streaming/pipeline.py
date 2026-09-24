@@ -10,13 +10,14 @@ from datetime import datetime, timezone
 
 from pyubx2 import UBXReader
 
-from . import config, filetransfer, rtcm
+from . import config, filetransfer, gnss_tunnel, rtcm
 from .frames import (
     PRIVATE_CLASS,
     ID_IDENT,
     FILE_PHASE_ABORTED,
     FILE_PHASE_DONE,
     CliResponse,
+    GnssTunnelData,
     FileRequest,
     FileStatus,
     FileUpBegin,
@@ -24,6 +25,7 @@ from .frames import (
     Heartbeat,
     Ident,
     NmeaSentence,
+    SyslogLine,
     SensorReading,
     decode_private,
 )
@@ -182,6 +184,22 @@ def _route_private(session: StationSession, frame: Frame) -> None:
             sink.on_nmea(msg.text, stamp, sysclk)
         return
 
+    if isinstance(msg, SyslogLine):
+        for sink in session.sinks:
+            sink.on_syslog(msg)
+        return
+
+    if isinstance(msg, GnssTunnelData):
+        # Straight through to whoever is holding the tunnel's local port. No
+        # buffering, no interpretation - see gnss_tunnel.py. A frame arriving
+        # with no tunnel open is dropped there, not here: between a session
+        # ending and the receiver going quiet there is always a tail of these,
+        # and it is normal.
+        tunnel = gnss_tunnel.registry.get(session.station_id)
+        if tunnel is not None:
+            tunnel.feed_from_device(msg.data)
+        return
+
     if isinstance(msg, CliResponse):
         session.handle_cli_response(msg)
         return
@@ -233,8 +251,13 @@ def _upload_receiver(session: StationSession) -> filetransfer.UploadReceiver:
     so replay.py can route these frames without a live connection.
     """
     if session.upload_receiver is None:
+        def reply(frame: bytes) -> None:
+            # Looked up per call: the device may have reconnected on a new writer.
+            if session.writer is not None:
+                session.writer.write(frame)
+
         session.upload_receiver = filetransfer.UploadReceiver(
-            config.STREAM_DIR, session.station_id)
+            config.STREAM_DIR, session.station_id, reply)
     return session.upload_receiver
 
 

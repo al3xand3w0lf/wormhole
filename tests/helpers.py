@@ -10,6 +10,7 @@ from streaming.frames import (
     ID_HEARTBEAT,
     ID_IDENT,
     ID_NMEA_GGA,
+    ID_SYSLOG_LINE,
     build_ubx,
 )
 
@@ -95,6 +96,11 @@ def cli_response(text: str, last: bool) -> bytes:
 def nmea_gga(text: str) -> bytes:
     """The device sends the sentence WITHOUT its CRLF."""
     return ubx(PRIVATE_CLASS, ID_NMEA_GGA, text.encode("ascii"))
+
+
+def syslog_line(ymdhms: tuple, level: int, text: str) -> bytes:
+    """Raw syslog-entry fields, as the SYSLOG_LINE frame carries them."""
+    return ubx(PRIVATE_CLASS, ID_SYSLOG_LINE, bytes(ymdhms) + bytes([level]) + text.encode("ascii"))
 
 
 def sensor(msg_id: int, fmt: str, rtc_unix: int, *values: int) -> bytes:

@@ -15,7 +15,17 @@ CASTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$CASTER_DIR")"
 BUILD_DIR="$CASTER_DIR/millipede-caster"
 REBUILD=false
-[ "${1:-}" = "--rebuild" ] && REBUILD=true
+USER_UNIT=true
+for arg in "$@"; do
+    case "$arg" in
+        --rebuild)      REBUILD=true ;;
+        # For a caller that runs the caster under its own (system) unit, e.g.
+        # install.sh - which also avoids the fixed user-unit name colliding
+        # between two instances on one host.
+        --no-user-unit) USER_UNIT=false ;;
+        *) echo "usage: $0 [--rebuild] [--no-user-unit]" >&2; exit 2 ;;
+    esac
+done
 
 if [ ! -f "$REPO_DIR/.env" ]; then
     echo "error: $REPO_DIR/.env not found." >&2
@@ -48,6 +58,11 @@ echo "Built $BUILD_DIR/caster/caster"
 PYTHON="$REPO_DIR/venv/bin/python3"
 [ -x "$PYTHON" ] || PYTHON="python3"
 "$PYTHON" "$CASTER_DIR/generate_config.py"
+
+if ! $USER_UNIT; then
+    echo "Caster built and configured; skipping the user unit (--no-user-unit)."
+    exit 0
+fi
 
 # --- 4. User-level systemd unit, no sudo for routine start/stop/restart -----
 UNIT_DIR="$HOME/.config/systemd/user"

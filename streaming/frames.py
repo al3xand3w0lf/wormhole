@@ -6,8 +6,7 @@ pyubx2's NOMINAL fallback for unknown classes. The frame *envelope* is standard
 UBX, so it rides the same sync-byte scan as real UBX/RTCM3 and is checksum-protected.
 
 **To adapt this to your own device, change the ids and `SENSOR_SPECS` below** —
-the sensor set here is an example (two current monitors, two accelerometers, a
-humidity and a pressure sensor), not part of the transport. A new sensor needs
+the sensor set here is an example, not part of the transport. A new sensor needs
 a new id here **and** an entry in `SENSOR_SPECS`, matching the firmware's
 payload struct.
 
@@ -37,32 +36,65 @@ Wire format (little-endian, packed):
     0x12  NMEA_GGA             dev->srv   raw NMEA-GGA line, ASCII, no CRLF
                                             (may EXCEED the NMEA-0183 82-char
                                             cap - see the note below)
+    0x13  SENSOR_WN90LP        dev->srv   <Iiiiiiiiiiiii  rtc_unix, source,
+                                            light_lux, uvi_d, temp_mC, rh_mpct,
+                                            wind_mms, gust_mms, dir_deg,
+                                            rain_um, press_Pa, rain_ctr_um,
+                                            batt_mV, cap_mV  (a WN90LP weather sensor
+                                            over Modbus RTU; 56-byte payload)
+    0x14  GNSS_TUNNEL_DOWN     srv->dev   raw bytes for the ZED UART
+    0x15  GNSS_TUNNEL_UP       dev->srv   raw bytes from the ZED UART
+    0x16  SYSLOG_LINE          dev->srv   [yy mm dd hh mi ss level u8][text]
+                                            one device syslog entry, yy = year-2000
+    0x17  FILE_UP_ACK          srv->dev   [result i8][crc32 u32]  verdict on an
+                                            upload; the device deletes its SD
+                                            copy only on result 1
+
+⚠️ `source` is provenance, not a measurement: 0 = a sample the producer took
+itself at its own rate, 1 = a per-minute value recovered from the sensor's own
+30-minute history after an outage. They are NOT the same quantity and must not
+be mixed silently. In the history block `wind_mms` is a per-minute MEAN and
+`gust_mms` a per-minute MAXIMUM, while a live row carries instantaneous
+readings of both - three different statistics under two column names. Any
+consumer computing rates, gusts or extremes has to split on this column first.
+INT32_MIN here means the producer did not say.
+
+⚠️ WN90LP fields use INT32_MIN as "no reading", NOT 0. The sensor reports
+0xFFFF per register for an invalid measurement; a station forwarding that as 0
+would turn a missing wind sample into recorded calm, and a missing pressure
+into 0 hPa. Decoding keeps the sentinel verbatim - it is the sink's and the
+consumer's business to render it as empty, and nothing on this path may
+substitute a zero. The producer that reads your sensor must never invent a
+value either.
 
 ⚠️ A NMEA_GGA payload is NOT bounded by the NMEA-0183 limit of 82 characters.
-A rover receiver configured for high-precision NMEA (on u-blox:
-CFG-NMEA-HIGHPREC) breaks that limit on purpose, and its documentation says so:
-7 decimals of minutes for lat/lon (~0.2 mm) and 3 for altitude, against 5/2
-(~1.8 cm) otherwise. A fixed rover sentence with age and reference-station ID
-measures 88 characters. The sentence is stored and forwarded VERBATIM and
-nothing on this path may bound, truncate or re-format it - such a check would
-drop exactly the sentences from the stations that reached an RTK fix, and
-nowhere else. Regression tests: tests/test_frames.py and tests/test_sinks.py,
-both on a real 88-char line.
+A rover running with CFG-NMEA-HIGHPREC sends such sentences, which
+u-blox documents as breaking that limit on purpose: 7 decimals of minutes for
+lat/lon (~0.2 mm) and 3 for altitude, against 5/2 (~1.8 cm) before. A fixed
+rover sentence with age and reference-station ID measures 88 characters. The
+sentence is stored and forwarded VERBATIM and nothing on this path may bound,
+truncate or re-format it - such a check would drop exactly the sentences from
+the stations that reached an RTK fix, and nowhere else. Regression tests:
+tests/test_frames.py and tests/test_sinks.py, both on a real 88-char line.
 
 RTK rover downlink (streaming/rover.py): **one RTCM3 frame per envelope, never
-two and never half of one.** That contract is what lets the device stay free of
+two and never half of one.** That contract is what lets the STM32 stay free of
 any RTCM3 understanding — it strips the envelope and hands the payload to the
 receiver unchanged; type, length and CRC-24Q are the receiver's business.
 Breaking it does not produce an error anywhere, it produces a rover that
 silently never fixes.
 
-IDENT's role byte is what lets streaming/rover_discovery.py auto-subscribe a
-rover with no hand-edited config — see that module's docstring. On the device
-side it derives naturally from whatever mode selector your firmware already
-has (batch vs. streaming, base vs. rover); it does not need a new config key of
-its own. A missing/zero byte (old firmware, or a payload too short to carry
-it) decodes as ROLE_UNSET, never as ROLE_BASE — an auto-created correction
-source requires an explicit ROLE_BASE, not silence.
+IDENT's role byte (see your device's firmware changelog) is what lets
+streaming/rover_discovery.py auto-subscribe a rover with no hand-edited config.
+In the reference firmware it is derived from the
+device's own `device_mode_t` (not a new CONFIG.TXT key), and the mapping is not
+1:1: `DEVICE_MODE_BATCH` (0) would collide with "unset" (old firmware always
+sends 0 here) if cast directly, so the device maps
+BATCH->3(logger), STREAM_PLAIN->4(stream), STREAM_BASE->1(base),
+STREAM_ROVER->2(rover), BATCH_DUTY->3(logger),
+NTRIP_ROVER->5(rover_ntrip). A missing/zero byte (old firmware, or a payload
+too short to carry it) decodes as ROLE_UNSET, never as ROLE_BASE — an
+auto-created correction source requires an explicit ROLE_BASE, not silence.
 
 ⚠️ ROLE_ROVER_NTRIP is a rover that fetches its corrections from an NTRIP
 caster itself and DISCARDS anything we push it. It is deliberately not
@@ -77,10 +109,10 @@ otherwise — which is the only reason ROLE_ROVER_NTRIP was handled correctly on
 the day the firmware shipped it. `!= ROLE_BASE` or "anything rover-ish" would
 have auto-subscribed it.
 
-File transfer: after FILE_BEGIN the server writes exactly `total` RAW bytes
-into the socket — no envelope, no per-chunk header. The device does not need
-one if its own modem read call is itself length-prefixed, so the byte count
-already comes from there on every read. `total = 0` means "not found".
+File transfer: after FILE_BEGIN the server writes
+exactly `total` RAW bytes into the socket — no envelope, no per-chunk header.
+The device does not need one: AT+QIRD is itself length-prefixed, so the byte
+count already comes from its modem on every read. `total = 0` means "not found".
 
 The upload direction is mirrored, not symmetric: it stays in ordinary framed
 0x0F messages, because here the *receiver* is this server, which already has a
@@ -122,13 +154,34 @@ ID_FILE_UP_DATA = 0x0F
 ID_RTCM_DATA = 0x10
 ID_RTCM_INFO = 0x11
 ID_NMEA_GGA = 0x12
+ID_SENSOR_WN90LP = 0x13
+# GNSS maintenance tunnel (K-01 Etappe 2). Raw bytes to and from the receiver's
+# UART - no structure, no interpretation, on purpose: u-blox' flash protocol is
+# not public and does not need to be, because the tool that speaks it runs on the
+# operator's PC and we only carry its bytes.
+ID_GNSS_TUNNEL_DOWN = 0x14  # server -> device, bytes for the ZED
+ID_GNSS_TUNNEL_UP = 0x15    # device -> server, bytes from the ZED
+# One device system-log entry (the device's streaming syslog). Raw fields, not
+# the formatted line: formatted it would exceed the device's 128 B payload cap.
+ID_SYSLOG_LINE = 0x16
+# Server verdict on one finished upload (srv->dev): [result i8][crc32 u32].
+ID_FILE_UP_ACK = 0x17
+UP_ACK_OK = 1
+UP_ACK_SIZE_MISMATCH = -1
+UP_ACK_CRC_MISMATCH = -2
+UP_ACK_ABORTED = -3
 
-# An RTCM3 frame is 3 B header + up to 1023 B payload + 3 B CRC-24Q. Size your
-# device's inbound buffer to the same ceiling, or anything above this could
-# never be reassembled there.
+# An RTCM3 frame is 3 B header + up to 1023 B payload + 3 B CRC-24Q. The device
+# sizes its inbound buffer from the same ceiling (1032 bytes in the reference
+# firmware), so anything above this could never be reassembled there.
 RTCM3_MAX_FRAME = 1029
 
-# FILE_STATUS phases (mirror whatever enum your firmware uses for this)
+# Largest tunnel payload per envelope. The device reassembles inbound envelopes
+# into 1032 bytes (reference firmware), so this is the
+# receiving buffer's ceiling and not a throughput preference.
+TUNNEL_MAX_PAYLOAD = 1024
+
+# FILE_STATUS phases (as the device firmware numbers them)
 FILE_PHASE_ACCEPTED = 0
 FILE_PHASE_DONE = 1
 FILE_PHASE_ABORTED = 2
@@ -141,6 +194,13 @@ SENSOR_SPECS = {
     ID_SENSOR_ADXL345_EXT: ("accelext", "<Iiii", ("x_ug", "y_ug", "z_ug")),
     ID_SENSOR_SHT4X: ("sht4x", "<Iii", ("temp_mC", "rh_mpct")),
     ID_SENSOR_LPS28DFW: ("lps28", "<Iii", ("press_Pa", "temp_mC")),
+    ID_SENSOR_WN90LP: (
+        "wn90lp",
+        "<I" + "i" * 13,
+        ("source", "light_lux", "uvi_d", "temp_mC", "rh_mpct", "wind_mms",
+         "gust_mms", "dir_deg", "rain_um", "press_Pa", "rain_ctr_um",
+         "batt_mV", "cap_mV"),
+    ),
 }
 
 SENSOR_STREAMS = tuple(spec[0] for spec in SENSOR_SPECS.values())
@@ -180,6 +240,48 @@ class NmeaSentence:
     text: str
 
 
+_SYSLOG_LEVELS = {0: "ERROR", 1: "WARN ", 2: "INFO ", 3: "DEBUG"}
+
+
+@dataclass(frozen=True)
+class SyslogLine:
+    """One entry of the device's daily system log (device -> server).
+
+    Carries the raw SystemLogEntry_t fields; `formatted()` rebuilds the line
+    byte for byte as the device's systemLog_formatEntry() writes it to SD, so the
+    server copy and the SD copy of a log file can be compared with diff.
+    The timestamp is the device RTC (UTC), not the GNSS clock.
+    """
+
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    level: int
+    text: str
+
+    def formatted(self) -> str:
+        return (
+            f"{2000 + self.year:04d}-{self.month:02d}-{self.day:02d} "
+            f"{self.hour:02d}:{self.minute:02d}:{self.second:02d} "
+            f"[{_SYSLOG_LEVELS.get(self.level, '?????')}] {self.text}\r\n"
+        )
+
+
+@dataclass(frozen=True)
+class GnssTunnelData:
+    """Raw receiver bytes travelling up from the device (K-01 Etappe 2).
+
+    No fields beyond the bytes, and that is the whole point: this frame exists so
+    that u-center and ubxfwupdate can talk to a ZED through the device without
+    either end of the link understanding the conversation.
+    """
+
+    data: bytes
+
+
 @dataclass(frozen=True)
 class CliResponse:
     text: str
@@ -214,7 +316,8 @@ class FileStatus:
 
 @dataclass(frozen=True)
 class SensorReading:
-    stream: str  # "ina219" | "ina219ext" | "accel" | "accelext" | "sht4x" | "lps28"
+    stream: str  # "ina219" | "ina219ext" | "accel" | "accelext" | "sht4x"
+    #             | "lps28" | "wn90lp"
     rtc_unix: int
     values: dict = field(default_factory=dict)
 
@@ -271,6 +374,24 @@ def encode_file_begin(total: int, crc32: int, name: str) -> bytes:
     return build_ubx(PRIVATE_CLASS, ID_FILE_BEGIN, payload)
 
 
+def encode_file_up_ack(result: int, crc32: int) -> bytes:
+    """Build a FILE_UP_ACK frame: the server's verdict on one upload."""
+    return build_ubx(PRIVATE_CLASS, ID_FILE_UP_ACK,
+                     struct.pack("<bI", result, crc32 & 0xFFFFFFFF))
+
+
+def encode_gnss_tunnel(raw: bytes) -> bytes:
+    """Wrap operator bytes for the device's receiver UART.
+
+    The caller must chunk to at most TUNNEL_MAX_PAYLOAD. Refusing rather than
+    splitting here is deliberate: splitting would be silent, and a tunnel whose
+    chunking rules live in two places is one whose flow control lives in neither.
+    """
+    if not raw or len(raw) > TUNNEL_MAX_PAYLOAD:
+        raise ValueError(f"tunnel chunk out of range: {len(raw)} bytes")
+    return build_ubx(PRIVATE_CLASS, ID_GNSS_TUNNEL_DOWN, raw)
+
+
 def decode_private(raw: bytes):
     """Decode a private 0xF0 frame. Returns None for unknown/malformed frames."""
     msg_id = raw[3]
@@ -306,6 +427,20 @@ def decode_private(raw: bytes):
         # checksummed. A visible replacement char in the file is the honest
         # record of what arrived.
         return NmeaSentence(payload.decode("ascii", errors="replace").strip())
+
+    if msg_id == ID_SYSLOG_LINE:
+        if len(payload) < 7:
+            return None
+        y, mo, d, h, mi, se, lvl = payload[:7]
+        return SyslogLine(y, mo, d, h, mi, se, lvl,
+                          payload[7:].decode("ascii", errors="replace"))
+
+    if msg_id == ID_GNSS_TUNNEL_UP:
+        # Length zero is not malformed here, merely empty - but there is nothing
+        # to hand on, so it is dropped like any other no-op frame.
+        if not payload:
+            return None
+        return GnssTunnelData(bytes(payload))
 
     if msg_id == ID_CLI_RESPONSE:
         if len(payload) < 1:

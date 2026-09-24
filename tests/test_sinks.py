@@ -6,7 +6,7 @@ from streaming.pipeline import route_frame
 from streaming.sinks import FileSink
 from streaming.station import StationSession
 
-from .helpers import ident, nmea_gga, rawx, rtcm3, sensor
+from .helpers import ident, nmea_gga, rawx, rtcm3, sensor, syslog_line
 from streaming.frames import ID_SENSOR_INA219, ID_SENSOR_SHT4X
 
 WEEK = 2378
@@ -200,9 +200,9 @@ def test_nmea_lands_in_its_own_hourly_file_beside_the_ubx(tmp_path):
 
 
 def test_nmea_file_carries_a_highprec_sentence_verbatim(tmp_path):
-    """88 characters, straight off a rover receiver, into the file unchanged.
+    """88 characters, straight off the bench rover, into the file unchanged.
 
-    High-precision NMEA (u-blox CFG-NMEA-HIGHPREC) deliberately exceeds the
+    CFG-NMEA-HIGHPREC deliberately exceeds the
     NMEA-0183 cap of 82 to gain 7 decimals of minutes and 3 for altitude. The
     file is the analysis product, so a truncation or a length check here would
     throw away precisely the precision the RTK fix was for.
@@ -244,7 +244,6 @@ def test_a_sink_that_owns_no_file_survives_a_gga(tmp_path):
     Sink().on_nmea("$GNGGA,140000.00,,,,,0,00,99.99,,,,,,*56", None, False)
 
 
-
 def test_named_station_labels_both_the_directory_and_the_file_names(tmp_path):
     """The point of the name on the wire: a bare file name must say which
     project site it belongs to. "2001_ubx_*.ubx" cannot; "A001_2001_ubx_*.ubx"
@@ -272,3 +271,66 @@ def test_unnamed_station_keeps_the_bare_id_layout(tmp_path):
 
     assert (tmp_path / "2001" / "ubx").is_dir()
     assert all(p.name.startswith("2001_ubx_") for p in (tmp_path / "2001" / "ubx").iterdir())
+
+
+def test_sensor_csv_day_file_reopens_for_a_late_row(tmp_path):
+    """A day's sensor file is NOT final at midnight.
+
+    Sensor rows are filed by the reading's own timestamp, not by arrival, and
+    `_RotatingFile._ensure` rotates in either direction with mode="a". So a
+    producer that restarts just after midnight and backfills the missing
+    minutes appends to *yesterday's* file, after today's has already been
+    created. A consumer that treats a past
+    day as closed silently loses those rows.
+    """
+    from datetime import datetime, timezone
+
+    from streaming.frames import SensorReading
+
+    class _Clock:
+        leap_s = None
+
+        def utc_of(self, _dt):
+            return None
+
+    def epoch(iso):
+        return int(datetime.fromisoformat(iso).timestamp())
+
+    sink = FileSink(tmp_path, 7090, raw_capture=False, station_name="W001")
+    clock = _Clock()
+    values = {"source": 0, "temp_mC": 23000}
+
+    sink.on_sensor(SensorReading("wn90lp", epoch("2026-09-08T00:03:00+00:00"),
+                                 dict(values)), clock)
+    sink.on_sensor(SensorReading("wn90lp", epoch("2026-09-07T23:57:00+00:00"),
+                                 {**values, "source": 1}), clock)
+    sink.on_sensor(SensorReading("wn90lp", epoch("2026-09-08T00:05:00+00:00"),
+                                 dict(values)), clock)
+    sink.close()
+
+    sensors = tmp_path / "W001_7090" / "sensors"
+    yesterday = (sensors / "W001_7090_wn90lp_20260907.csv").read_text().splitlines()
+    today = (sensors / "W001_7090_wn90lp_20260908.csv").read_text().splitlines()
+
+    assert len(yesterday) == 2, "header plus the one late row"
+    assert yesterday[1].startswith(str(epoch("2026-09-07T23:57:00+00:00")))
+    assert len(today) == 3, "header plus both of today's rows"
+    assert today.count(today[0]) == 1, "header written once, not on reopen"
+
+
+def test_syslog_rebuilds_the_device_line_in_a_daily_file(tmp_path):
+    """Same bytes as systemLog_formatEntry() writes to SD, CRLF included, and
+    keyed on the entry's own device date - not on the GPS clock, so lines
+    buffered across midnight still land in the day they were written."""
+    session = make_session(tmp_path)
+    framer = StreamFramer()
+
+    feed(session, syslog_line((26, 9, 18, 23, 59, 58), 2, "--- LOG HEADER ---"), framer)
+    feed(session, syslog_line((26, 9, 19, 0, 0, 1), 0, "boom"), framer)
+    session.close()
+
+    log = tmp_path / "1001" / "log"
+    assert (log / "1001_log_20260918.txt").read_bytes() == \
+        b"2026-09-18 23:59:58 [INFO ] --- LOG HEADER ---\r\n"
+    assert (log / "1001_log_20260919.txt").read_bytes() == \
+        b"2026-09-19 00:00:01 [ERROR] boom\r\n"
