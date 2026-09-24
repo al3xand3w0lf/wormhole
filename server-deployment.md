@@ -158,10 +158,10 @@ chmod 600 .env
 
 # set KEY=VALUE, whether the key is present, commented out (# KEY=) or missing
 setenv() { if grep -qE "^#? ?$1=" .env; then sed -i -E "s|^#? ?$1=.*|$1=$2|" .env; else echo "$1=$2" >> .env; fi; }
-gen()    { python3 -c "import secrets; print(secrets.token_urlsafe(24))"; }
+gen()    { python3 -c "import secrets; print(secrets.token_urlsafe($1))"; }
 
-setenv API_KEY            "$(gen)"
-setenv STREAM_CLI_SECRET  "$(gen)"
+setenv API_KEY            "$(gen 24)"     # 32 characters
+setenv STREAM_CLI_SECRET  "$(gen 23)"     # 31 characters - NOT more, see below
 setenv PORT               $BATCH
 setenv STREAM_PORT        $N
 setenv STREAM_ADMIN_HOST  127.0.0.1
@@ -177,7 +177,17 @@ grep -vE '^\s*(#|$)' .env | sed -E 's/^((API_KEY|STREAM_CLI_SECRET|STREAM_CASTER
 ```
 
 You must see `API_KEY=***`, `STREAM_CLI_SECRET=***` and the four ports of this
-instance. `API_KEY` must **not** be `changeme`.
+instance. `API_KEY` must **not** be `changeme`. And the CLI secret must be **31
+characters at most**:
+
+```bash
+S=$(grep '^STREAM_CLI_SECRET=' .env | cut -d= -f2); echo "${#S} characters"   # must say 31
+```
+
+The device keeps the secret in a 32-byte field, and one byte of that is the
+terminator. A 32-character secret is cut to 31 without any message, and after
+that the device answers **every** remote CLI command with `auth failed`, although
+the value in `.env` and in `CONFIG.TXT` look identical.
 
 What the two secrets are for:
 
@@ -466,7 +476,8 @@ own sample config. See `caster/README.md`.
 | `address already in use` in the stream log, admin API not answering | Something else holds port N+1 — typically an `ssh -L` that was run **on the server** | `ss -ltnp \| grep :$ADMIN` shows the owner; close that SSH session (`exit`) or `kill` the `ssh -L` pid, then `systemctl restart wormhole-$N-stream` |
 | `curl` to the admin API: `401 Invalid API key` | Wrong or missing `X-API-Key` | Use the key from **this** instance's `.env` |
 | Device connects but remote CLI is refused | `streaming_cli_secret` on the device ≠ `STREAM_CLI_SECRET` | Re-print step 9 and fix `CONFIG.TXT` |
-| Stream log: `STREAM_CLI_SECRET is empty` | Step 4 skipped or incomplete | Run step 4's `setenv STREAM_CLI_SECRET "$(gen)"`, restart the stream service |
+| Remote CLI: `auth failed`, although `.env` and `CONFIG.TXT` carry the same secret | The secret is longer than 31 characters; the device silently keeps only the first 31 | Cut `STREAM_CLI_SECRET` in `.env` to its first 31 characters, restart the stream service. That value already matches the device, so `CONFIG.TXT` does not need to change |
+| Stream log: `STREAM_CLI_SECRET is empty` | Step 4 skipped or incomplete | Run step 4's `setenv STREAM_CLI_SECRET "$(gen 23)"`, restart the stream service |
 | Stream log keeps reconnecting to the caster | `STREAM_CASTER_ENABLE=true` but no caster running (step 6 skipped, or `.env` copied from another instance) | Do step 6 + the caster unit, or set `STREAM_CASTER_ENABLE=false` |
 | `git pull`: `not a git repository` | Code was unpacked from a ZIP | `git init -b main && git remote add origin https://github.com/al3xand3w0lf/wormhole.git && git fetch origin main && git reset origin/main && git checkout -- .` (keeps `.env`, `venv/`, `data/` — they are git-ignored) |
 | Device cannot connect at all, `nc` from your PC fails | Port not open in ufw **or** in the provider's firewall | Step 8 |
