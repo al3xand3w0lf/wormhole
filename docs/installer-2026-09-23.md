@@ -187,10 +187,32 @@ The production instance's streaming service kept its start time throughout.
   both stations. The user was removed afterwards.
 - uninstall with and without `--purge`.
 
-**Not verified here:** the ufw path (this host runs no ufw, and activating it
-next to the live instance was not worth the risk), Let's Encrypt (needs a public
-DNS name), and the interactive dialogs. Those still need a walk-through on a
-spare machine.
+**Not verified here:** Let's Encrypt (needs a public DNS name) and a complete
+walk-through of the interactive dialogs.
+
+## Verified on a production host with ufw (2026-09-24)
+
+A Debian 13 (trixie), x86_64, Python 3.13 server that already ran five
+hand-installed instances (8000-12000) behind an active ufw. The installer came
+from GitHub (the customer path), and the instance was a throwaway on port block
+13000:
+
+- install in 50 s; all 20 checks passed, including `pytest`;
+- ufw: rules for 13000/13002/13003 with the comment `wormhole_13000 <role>`, for
+  IPv4 and IPv6. The admin port 13001 got none;
+- *Settings → Firewall* path (`st_firewall` with a smaller selection): the
+  deselected rule was deleted and the rest kept;
+- uninstall `--purge`: all rules gone, and `ufw status` byte-identical to before;
+  units, directory, registry entry and `wormhole-setup` link gone;
+- the five existing instances were untouched (unit start times compared before
+  and after).
+
+**What the installer cannot see:** from outside, 13000-13003 stayed closed while
+ufw allowed them. The host sits behind a **provider firewall** (a cloud panel
+policy) that opens nothing by default. The same holds for that host's caster
+ports 8002-11002. The server test says so ("reachability from outside cannot be
+tested from here"), and the summary names the ports. Opening them at the
+provider is a step outside the machine.
 
 ## The first interactive test (2026-09-24), and what it changed
 
