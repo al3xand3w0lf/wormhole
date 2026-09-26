@@ -606,7 +606,7 @@ async def send_cli(station_id: int, req: CliRequest, _: str = Depends(verify_api
 
     timeout = req.timeout
     if timeout is None:
-        # download/downloadfw close the socket, transfer, then reconnect to answer.
+        # download/downloadfw answer only once the file has crossed the stream.
         timeout = (
             config.STREAM_CLI_TRANSFER_TIMEOUT
             if is_download_class(req.cmd)

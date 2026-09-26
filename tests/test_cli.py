@@ -1,9 +1,7 @@
-"""CLI request/response over the stream, including the download reconnect dance.
+"""CLI request/response over the stream.
 
-The download case is the subtle one: the device answers *twice* and closes the
-socket in between. If we resolved the request on the first answer, the caller would
-get an ack instead of the result; if we dropped the request on the disconnect, the
-real answer would be lost entirely.
+A download-class command is an ordinary command since the transfer rides the
+stream: one answer, sent once the file has arrived, completes the request.
 """
 
 import asyncio
@@ -70,27 +68,15 @@ async def test_simple_command_reassembles_chunks():
 
 
 @pytest.mark.asyncio
-async def test_download_ack_does_not_resolve_the_request():
+async def test_download_resolves_on_its_single_answer():
     session, _ = make_session()
     task = asyncio.create_task(session.send_cli("download CONFIG.TXT", "", timeout=5))
     await asyncio.sleep(0)
 
-    # 1) The device acks over the still-open socket, with last=True.
-    session.handle_cli_response(CliResponse("stream paused for transfer\r\n", last=True))
-    await asyncio.sleep(0)
-    assert not task.done(), "the ack must not complete the request"
-
-    # 2) The device closes the socket to run the transfer.
-    session.unbind()
-    assert session.transfer_in_progress is True
-
-    # 3) It reconnects with a fresh IDENT ...
-    session.bind(FakeWriter(), "1.2.3.4:5001")
-    assert session.transfer_in_progress is False
-
-    # 4) ... and only now sends the deferred output.
-    session.handle_cli_response(CliResponse("CONFIG.TXT downloaded\r\n", last=True))
-    assert await task == "CONFIG.TXT downloaded\r\n"
+    # The transfer rides the stream; the device answers once, when it is done.
+    session.handle_cli_response(CliResponse("CONFIG.TXT: 1234 bytes\r\n", last=False))
+    session.handle_cli_response(CliResponse("download OK\r\n", last=True))
+    assert await task == "CONFIG.TXT: 1234 bytes\r\ndownload OK\r\n"
 
 
 @pytest.mark.asyncio
@@ -126,13 +112,12 @@ async def test_stale_connection_cleanup_must_not_unbind_the_live_one():
 
 
 @pytest.mark.asyncio
-async def test_disconnect_during_normal_command_is_not_a_transfer():
+async def test_disconnect_during_command_times_out():
     session, _ = make_session()
     task = asyncio.create_task(session.send_cli("sysinfo", "", timeout=0.2))
     await asyncio.sleep(0)
 
     session.unbind()
-    assert session.transfer_in_progress is False
 
     with pytest.raises(asyncio.TimeoutError):
         await task

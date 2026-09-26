@@ -247,7 +247,7 @@ async def test_missing_file_resolves_a_pending_download_cli(tmp_path, monkeypatc
 
     session, writer = make_session()
     task = asyncio.create_task(session.send_cli("downloadfw", "", timeout=5))
-    await asyncio.sleep(0.05)   # let send_cli register as awaiting-deferred
+    await asyncio.sleep(0.05)   # let send_cli register the download
 
     await filetransfer.send_file(session, "nope.bin")
 

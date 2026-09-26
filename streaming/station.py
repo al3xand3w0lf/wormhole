@@ -1,11 +1,14 @@
 """Per-station session state and the CLI request/response machinery.
 
-A `StationSession` outlives its TCP connection. That is not an accident: a
-`download` / `downloadfw` command makes the device close the streaming socket, run
-the transfer over the same modem AT channel, then reconnect with a fresh IDENT and
-only *then* send the buffered command output. If the pending CLI future lived on
-the connection it would be destroyed by that disconnect and the answer would be
-lost. Sessions are therefore keyed by station id in `StationRegistry`.
+A `StationSession` outlives its TCP connection: a device re-dials after every
+bearer loss, often opening the new socket before the old one is reaped, and its
+counters, clock and sinks must carry across. Sessions are therefore keyed by
+station id in `StationRegistry`.
+
+A `download` / `downloadfw` command is an ordinary command: the file rides the
+open streaming socket (streaming/filetransfer.py) and the device answers live
+once it is done. It only needs a longer timeout, and a way to be resolved early
+when the server already knows the transfer failed (`fail_pending_download`).
 """
 
 import asyncio
@@ -18,12 +21,9 @@ from .sinks import Sink
 
 logger = logging.getLogger("streaming")
 
-# Commands that make the device pause the stream, transfer, and reconnect
+# Commands that pull a file over the stream and answer only once it has arrived
 # (any command whose name starts with "download", in the reference firmware).
 _DOWNLOAD_PREFIX = "download"
-
-# The ack the device sends over the still-open socket before it closes it.
-_TRANSFER_ACK = "stream paused for transfer"
 
 
 def is_download_class(cmd: str) -> bool:
@@ -42,11 +42,7 @@ class StationSession:
         self.peer: str | None = None
         self.connected_since: datetime | None = None
         self.last_frame_at: datetime | None = None
-        # Legacy path (streaming_file_transfer = 0): the device closes the socket
-        # for an HTTP/FTP transfer and reconnects to answer.
-        self.transfer_in_progress = False
-        # Current path: the transfer rides this socket, so it has a name and a
-        # task instead of a disconnect.
+        # A file transfer rides this socket, so it has a name and a task.
         self.file_transfer_active = False
         self.file_transfer_name: str | None = None
         self.file_transfer_task = None
@@ -78,8 +74,7 @@ class StationSession:
         self._cli_lock = asyncio.Lock()
         self._cli_future: asyncio.Future | None = None
         self._cli_chunks: list[str] = []
-        self._cli_awaiting_deferred = False
-        self._cli_acked = False
+        self._cli_is_download = False
 
     # -- connection binding -------------------------------------------------
 
@@ -103,12 +98,6 @@ class StationSession:
         self.writer = writer
         self.peer = peer
         self.connected_since = datetime.now(timezone.utc)
-        if self.transfer_in_progress:
-            logger.info(
-                "station %s reconnected after transfer (awaiting deferred CLI output)",
-                self.station_id,
-            )
-            self.transfer_in_progress = False
 
     def unbind(self, writer: asyncio.StreamWriter | None = None) -> None:
         """Release this connection's binding.
@@ -128,14 +117,6 @@ class StationSession:
         # An upload in flight cannot survive the socket it was riding on.
         if self.upload_receiver is not None:
             self.upload_receiver.abort("connection closed")
-        # A disconnect while a download-class command is outstanding is expected,
-        # not an error: the device is transferring and will come back.
-        if self._cli_awaiting_deferred and not self._done():
-            self.transfer_in_progress = True
-            logger.info(
-                "station %s disconnected for transfer - keeping CLI request open",
-                self.station_id,
-            )
 
     # -- timestamps ---------------------------------------------------------
 
@@ -169,8 +150,7 @@ class StationSession:
             loop = asyncio.get_running_loop()
             self._cli_future = loop.create_future()
             self._cli_chunks = []
-            self._cli_awaiting_deferred = is_download_class(cmd)
-            self._cli_acked = False
+            self._cli_is_download = is_download_class(cmd)
 
             self._log_cli(f"->\t{cmd}")
             # Waits out a running file transfer rather than splicing into it.
@@ -199,30 +179,18 @@ class StationSession:
                 return await asyncio.wait_for(self._cli_future, timeout)
             finally:
                 self._cli_future = None
-                self._cli_awaiting_deferred = False
-                self._cli_acked = False
+                self._cli_is_download = False
 
     def handle_cli_response(self, resp: CliResponse) -> None:
         """Feed a CLI_RESPONSE frame into the pending request."""
         if self._done():
-            # Unsolicited (e.g. the deferred answer arrived after we timed out).
+            # Unsolicited (e.g. the answer arrived after we timed out).
             self._log_cli(f"<-\t{resp.text.strip()}")
             return
 
         self._cli_chunks.append(resp.text)
         if not resp.last:
             return
-
-        # A download-class command answers twice: first the ack over the still-open
-        # socket, then — after the transfer and reconnect — the real output. Only
-        # the second one completes the request.
-        if self._cli_awaiting_deferred and not self._cli_acked:
-            joined = "".join(self._cli_chunks)
-            if _TRANSFER_ACK in joined:
-                self._cli_acked = True
-                self._cli_chunks = []
-                self._log_cli(f"<-\t{joined.strip()} (ack, awaiting transfer)")
-                return
 
         text = "".join(self._cli_chunks)
         self._cli_chunks = []
@@ -238,7 +206,7 @@ class StationSession:
         out the full timeout for a CLI_RESPONSE that a failed transfer may never
         produce.
         """
-        if self._cli_awaiting_deferred and not self._done():
+        if self._cli_is_download and not self._done():
             self._log_cli(f"<-\t{message} (server-detected, no device response)")
             if not self._cli_future.done():
                 self._cli_future.set_result(message)
@@ -262,7 +230,6 @@ class StationSession:
             "peer": self.peer,
             "connected_since": self.connected_since.isoformat() if self.connected_since else None,
             "last_frame_at": self.last_frame_at.isoformat() if self.last_frame_at else None,
-            "transfer_in_progress": self.transfer_in_progress,
             "file_transfer": self.file_transfer_name if self.file_transfer_active else None,
             "gps_time": gps.isoformat() if gps else None,
             "leap_s": self.clock.leap_s,

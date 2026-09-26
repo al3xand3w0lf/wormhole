@@ -237,7 +237,6 @@ class _Session:
         self.writer = _Writer()
         self.write_lock = asyncio.Lock()
         self.file_transfer_active = False
-        self.transfer_in_progress = False
         self.peer = peer
         # A real StationSession stamps this fresh in bind(); the router uses it
         # as the connection's identity.

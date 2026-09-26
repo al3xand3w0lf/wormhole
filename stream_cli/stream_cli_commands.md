@@ -270,20 +270,16 @@ in `stream_cli.py` only feeds `/help`.
 
 ### Special case: `download` / `downloadfw`
 
-These pause the stream, the device transfers the file over its own modem,
-reconnects, and **only then** sends the real answer. The script prints a note and
-waits accordingly (client timeout 620 s, matched to the server's 600 s transfer
-timeout). Needs a file that actually exists on the device.
+The file rides the open streaming socket, and the device answers **once**, when the
+transfer is done. The script prints a note and waits accordingly (client timeout
+620 s, matched to the server's 600 s transfer timeout). The file must exist in the
+server's download directory; if it does not, the answer comes back at once.
 
 ```
 1001> download measurement.bin
-  (download-class command — device pauses, transfers, reconnects; this can take a while)
+  (download-class command — answers once the file has crossed the stream; this can take a while)
 download measurement.bin: transfer complete
 ```
-
-Note that a device with file transfer over the stream disabled falls back to the
-older dance (ack → disconnect → reconnect → deferred answer). The server serves both
-and the client sees no difference beyond the wait.
 
 ---
 

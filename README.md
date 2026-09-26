@@ -309,7 +309,7 @@ straight out of the allowlist table in `stream_cli_commands.md`, so the doc is t
 command list — and `t` hands off to the REPL above.
 
 It holds no frame logic and never talks to a device directly — the server owns the
-secret, the response reassembly and the disconnect/reconnect transfer dance. Because
+secret, the response reassembly and the file transfers over the stream. Because
 the admin port binds loopback, reaching it from another machine means an SSH tunnel.
 Full reference, including the device allowlist: `stream_cli/stream_cli_commands.md`.
 
@@ -324,14 +324,13 @@ Two independent layers:
 The stream itself is **not encrypted** (no TLS yet) — the token authenticates, it does
 not conceal.
 
-### Commands that pause the stream
+### File-transfer commands
 
-A file-transfer command (e.g. a firmware or config download over the same modem) makes
-the device answer **twice**: it acks, **closes the socket**, runs the transfer, then
-**reconnects** and only *then* sends the buffered output. The server keeps the pending
-request alive across that disconnect — sessions are keyed by station id, not by
-connection — so the caller gets the real result rather than the ack. Use
-`STREAM_CLI_TRANSFER_TIMEOUT` (default 600 s).
+A file-transfer command (e.g. a firmware or config download) pulls the file over the
+open streaming socket (`streaming/filetransfer.py`, CRC32-checked), and the device
+answers **once**, when the transfer is done. Such commands get the long timeout
+(`STREAM_CLI_TRANSFER_TIMEOUT`, default 600 s), and a failure the server already knows
+about (file not found, transfer aborted) resolves the request at once.
 
 ### RTK rover correction downlink
 
@@ -372,7 +371,7 @@ byte-identical to the live run.
 ## Testing without hardware
 
 `fake_device.py` emulates a device end to end — identification, GNSS frames, sensor
-frames, and the full CLI flow including the pause/reconnect transfer dance:
+frames, and the full CLI flow including downloads over the stream:
 
 ```bash
 python3 streaming_server.py &

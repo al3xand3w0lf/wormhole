@@ -7,14 +7,11 @@ so the whole CLI control plane can be exercised end to end.
 
 A download-class command is served the way the firmware does it: FILE_REQUEST,
 then FILE_BEGIN, then exactly `total` RAW bytes off the same socket, CRC32
-checked. `--legacy-download` replays the old dance
-instead (ack -> disconnect -> reconnect -> deferred answer), which is what a
-device with `streaming_file_transfer = 0` still does.
+checked.
 
 Usage:
     python fake_device.py                       # localhost:9000, station 1001
     python fake_device.py --host 1.2.3.4 --station 1002 --secret s3cret
-    python fake_device.py --legacy-download     # pre-B1 behaviour
 
     # Exercise rover auto-discovery against a real base without hardware -
     # run two instances with ports/station ids that don't collide.
@@ -362,174 +359,149 @@ def gnssbridge_reply(cmd: str) -> str:
 
 
 def run(host: str, port: int, station: int, secret: str, duration: float,
-        legacy_download: bool = False, role: int = ROLE_UNSET,
-        rover_fix: tuple[float, float, int] | None = None) -> int:
+        role: int = ROLE_UNSET, rover_fix: tuple[float, float, int] | None = None) -> int:
     framer = StreamFramer()
-    deferred: str | None = None
     rtcm_in = 0        # RTCM_DATA envelopes received (B1)
     rtcm_bad = 0       # ... whose payload was not exactly one RTCM3 frame
     deadline = time.time() + duration
     last_navpvt = 0.0
 
+    sock = socket.create_connection((host, port), timeout=5)
+    sock.settimeout(0.5)
+    print(f"connected to {host}:{port}")
+    sock.sendall(ident(station, role))
+    print(f"-> IDENT station {station} (role={role})")
+
+    last_sensor = 0.0
+
     while time.time() < deadline:
-        sock = socket.create_connection((host, port), timeout=5)
-        sock.settimeout(0.5)
-        print(f"connected to {host}:{port}")
-        sock.sendall(ident(station, role))
-        print(f"-> IDENT station {station} (role={role})")
+        week, tow = now_week_tow()
+        sock.sendall(rawx(week, tow))
+        sock.sendall(rtcm3(1005))
+        sock.sendall(rtcm3(1077, 60))
 
-        if deferred is not None:
-            time.sleep(0.3)
-            sock.sendall(cli_response(f"{deferred}: transfer complete\r\n", True))
-            print(f"-> deferred CLI answer for '{deferred}'")
-            deferred = None
+        # --role rover: a periodic 3D fix, the one thing RoverAutoDiscovery
+        # (streaming/rover_discovery.py) needs to auto-subscribe this
+        # station to its nearest base. --rover-fix picks the position; the
+        # RTCM3 sent above is otherwise ignored for a real rover, but sent
+        # anyway so this stays one code path.
+        if role == ROLE_ROVER and rover_fix is not None and time.time() - last_navpvt > 1.0:
+            lat, lon, height_mm = rover_fix
+            sock.sendall(navpvt(lat, lon, height_mm))
+            last_navpvt = time.time()
 
-        last_sensor = 0.0
-        reconnect = False
-
-        while time.time() < deadline and not reconnect:
-            week, tow = now_week_tow()
-            sock.sendall(rawx(week, tow))
-            sock.sendall(rtcm3(1005))
-            sock.sendall(rtcm3(1077, 60))
-
-            # --role rover: a periodic 3D fix, the one thing RoverAutoDiscovery
-            # (streaming/rover_discovery.py) needs to auto-subscribe this
-            # station to its nearest base. --rover-fix picks the position; the
-            # RTCM3 sent above is otherwise ignored for a real rover, but sent
-            # anyway so this stays one code path.
-            if role == ROLE_ROVER and rover_fix is not None and time.time() - last_navpvt > 1.0:
-                lat, lon, height_mm = rover_fix
-                sock.sendall(navpvt(lat, lon, height_mm))
-                last_navpvt = time.time()
-
-            if time.time() - last_sensor > 3:
-                sock.sendall(
-                    build_ubx(
-                        PRIVATE_CLASS,
-                        ID_SENSOR_INA219,
-                        struct.pack("<Iiii", gps_rtc_unix(), 12400, 85, 1054),
-                    )
+        if time.time() - last_sensor > 3:
+            sock.sendall(
+                build_ubx(
+                    PRIVATE_CLASS,
+                    ID_SENSOR_INA219,
+                    struct.pack("<Iiii", gps_rtc_unix(), 12400, 85, 1054),
                 )
-                sock.sendall(
-                    build_ubx(
-                        PRIVATE_CLASS,
-                        ID_SENSOR_SHT4X,
-                        struct.pack("<Iii", gps_rtc_unix(), 21500, 45300),
-                    )
+            )
+            sock.sendall(
+                build_ubx(
+                    PRIVATE_CLASS,
+                    ID_SENSOR_SHT4X,
+                    struct.pack("<Iii", gps_rtc_unix(), 21500, 45300),
                 )
-                sock.sendall(build_ubx(PRIVATE_CLASS, ID_HEARTBEAT, b""))
-                last_sensor = time.time()
+            )
+            sock.sendall(build_ubx(PRIVATE_CLASS, ID_HEARTBEAT, b""))
+            last_sensor = time.time()
 
-            # Poll for inbound CMD_REQUEST
-            try:
-                # ⚠ While a tunnel is open, drain HARD and do not sleep below.
-                # The 4096-bytes-then-sleep(1) rhythm of the ordinary loop caps
-                # this socket at 4 kB/s, which is not a property of the tunnel
-                # but of this emulator - measured exactly that way on
-                # 2026-09-16 while looking for a server-side bottleneck that did
-                # not exist. The real firmware services its bridge every 1 ms.
-                if _tunnel_open:
-                    sock.settimeout(0.02)
-                data = sock.recv(65536 if _tunnel_open else 4096)
-                if not data:
-                    break
-                for frame in framer.feed(data):
-                    # RTK corrections (B1). Mirrors what rtcm_rover.c does on the
-                    # real device: strip the envelope, and the payload IS one
-                    # whole RTCM3 frame. Checking that here is the point of the
-                    # mirror — if the server ever packs two frames or half of one
-                    # into an envelope, the firmware's only symptom is a rover
-                    # that never fixes, which is unattributable from the outside.
-                    if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_RTCM_DATA:
-                        payload = ubx_payload(frame.raw)
-                        rtcm_in += 1
-                        ok = (len(payload) >= 6 and payload[0] == 0xD3
-                              and 3 + (((payload[1] & 0x03) << 8) | payload[2]) + 3 == len(payload))
-                        if not ok:
-                            rtcm_bad += 1
-                            print(f"<- RTCM_DATA MALFORMED: {len(payload)} B, "
-                                  f"first={payload[:3].hex()}")
-                        elif rtcm_in <= 3 or rtcm_in % 50 == 0:
-                            mtype = (payload[3] << 4) | (payload[4] >> 4)
-                            print(f"<- RTCM_DATA #{rtcm_in} type={mtype} "
-                                  f"{len(payload)} B (bad so far: {rtcm_bad})")
-                        continue
-
-                    if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_RTCM_INFO:
-                        payload = ubx_payload(frame.raw)
-                        if len(payload) >= 2:
-                            base_id = payload[0] | (payload[1] << 8)
-                            print(f"<- RTCM_INFO base_id={base_id}")
-                        continue
-
-                    if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_GNSS_TUNNEL_DOWN:
-                        payload = ubx_payload(frame.raw)
-                        global _tunnel_down_bytes, _tunnel_up_bytes
-                        _tunnel_down_bytes += len(payload)
-                        if _tunnel_open:
-                            # Echo it straight back up. No chunking games: the
-                            # envelope the server sent already respects the
-                            # device's reassembly ceiling, so the same size is
-                            # always legal in the other direction.
-                            sock.sendall(build_ubx(PRIVATE_CLASS, ID_GNSS_TUNNEL_UP, payload))
-                            _tunnel_up_bytes += len(payload)
-                        continue
-
-                    if frame.cls_ != PRIVATE_CLASS or frame.id_ != ID_CMD_REQUEST:
-                        continue
+        # Poll for inbound CMD_REQUEST
+        try:
+            # ⚠ While a tunnel is open, drain HARD and do not sleep below.
+            # The 4096-bytes-then-sleep(1) rhythm of the ordinary loop caps
+            # this socket at 4 kB/s, which is not a property of the tunnel
+            # but of this emulator - measured exactly that way on
+            # 2026-09-16 while looking for a server-side bottleneck that did
+            # not exist. The real firmware services its bridge every 1 ms.
+            if _tunnel_open:
+                sock.settimeout(0.02)
+            data = sock.recv(65536 if _tunnel_open else 4096)
+            if not data:
+                break
+            for frame in framer.feed(data):
+                # RTK corrections (B1). Mirrors what rtcm_rover.c does on the
+                # real device: strip the envelope, and the payload IS one
+                # whole RTCM3 frame. Checking that here is the point of the
+                # mirror — if the server ever packs two frames or half of one
+                # into an envelope, the firmware's only symptom is a rover
+                # that never fixes, which is unattributable from the outside.
+                if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_RTCM_DATA:
                     payload = ubx_payload(frame.raw)
-                    text, kind = handle_command(payload, secret)
-                    if kind == "gnssbridge":
-                        reply = gnssbridge_reply(text)
-                        print(f"<- CMD {text!r} -> {reply.splitlines()[0]}")
-                        sock.sendall(cli_response(reply, True))
-                        continue
-                    if kind == "upload":
-                        parts = text.split(None, 1)
-                        target = parts[1].strip() if len(parts) > 1 else "CONFIG.TXT"
-                        print(f"<- CMD {text!r} -> uploading over the stream")
-                        _, result = send_file_up(sock, target)
-                        sock.sendall(cli_response(result, True))
-                        continue
-                    is_download = kind == "download"
-                    if is_download and legacy_download:
-                        # Pre-B1 device (streaming_file_transfer = 0): the transfer
-                        # runs over HTTP/FTP, so the socket has to go away first.
-                        print(f"<- CMD '{text}' -> pausing stream for transfer")
-                        sock.sendall(cli_response("stream paused for transfer\r\n", True))
-                        time.sleep(0.2)
-                        deferred = text
-                        reconnect = True
-                        break
-                    if is_download:
-                        # B1: the transfer rides this socket and answers live.
-                        print(f"<- CMD {text!r} -> transferring over the stream")
-                        result = ""
-                        for candidate in target_files(text):
-                            ok, result = receive_file(sock, framer, candidate)
-                            if ok:
-                                break        # downloadcf stops at the first hit
-                        sock.sendall(cli_response(result, True))
-                        continue
-                    print(f"<- CMD -> {text.strip()!r}")
-                    sock.sendall(cli_response(text, True))
-            except socket.timeout:
-                pass
-            finally:
-                if _tunnel_open:
-                    sock.settimeout(0.5)
+                    rtcm_in += 1
+                    ok = (len(payload) >= 6 and payload[0] == 0xD3
+                          and 3 + (((payload[1] & 0x03) << 8) | payload[2]) + 3 == len(payload))
+                    if not ok:
+                        rtcm_bad += 1
+                        print(f"<- RTCM_DATA MALFORMED: {len(payload)} B, "
+                              f"first={payload[:3].hex()}")
+                    elif rtcm_in <= 3 or rtcm_in % 50 == 0:
+                        mtype = (payload[3] << 4) | (payload[4] >> 4)
+                        print(f"<- RTCM_DATA #{rtcm_in} type={mtype} "
+                              f"{len(payload)} B (bad so far: {rtcm_bad})")
+                    continue
 
-            if not _tunnel_open:
-                time.sleep(1.0)
+                if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_RTCM_INFO:
+                    payload = ubx_payload(frame.raw)
+                    if len(payload) >= 2:
+                        base_id = payload[0] | (payload[1] << 8)
+                        print(f"<- RTCM_INFO base_id={base_id}")
+                    continue
 
-        sock.close()
-        if reconnect:
-            print("disconnected for transfer, reconnecting in 2 s ...")
-            time.sleep(2)
-        else:
-            break
+                if frame.cls_ == PRIVATE_CLASS and frame.id_ == ID_GNSS_TUNNEL_DOWN:
+                    payload = ubx_payload(frame.raw)
+                    global _tunnel_down_bytes, _tunnel_up_bytes
+                    _tunnel_down_bytes += len(payload)
+                    if _tunnel_open:
+                        # Echo it straight back up. No chunking games: the
+                        # envelope the server sent already respects the
+                        # device's reassembly ceiling, so the same size is
+                        # always legal in the other direction.
+                        sock.sendall(build_ubx(PRIVATE_CLASS, ID_GNSS_TUNNEL_UP, payload))
+                        _tunnel_up_bytes += len(payload)
+                    continue
 
+                if frame.cls_ != PRIVATE_CLASS or frame.id_ != ID_CMD_REQUEST:
+                    continue
+                payload = ubx_payload(frame.raw)
+                text, kind = handle_command(payload, secret)
+                if kind == "gnssbridge":
+                    reply = gnssbridge_reply(text)
+                    print(f"<- CMD {text!r} -> {reply.splitlines()[0]}")
+                    sock.sendall(cli_response(reply, True))
+                    continue
+                if kind == "upload":
+                    parts = text.split(None, 1)
+                    target = parts[1].strip() if len(parts) > 1 else "CONFIG.TXT"
+                    print(f"<- CMD {text!r} -> uploading over the stream")
+                    _, result = send_file_up(sock, target)
+                    sock.sendall(cli_response(result, True))
+                    continue
+                is_download = kind == "download"
+                if is_download:
+                    # The transfer rides this socket and answers live.
+                    print(f"<- CMD {text!r} -> transferring over the stream")
+                    result = ""
+                    for candidate in target_files(text):
+                        ok, result = receive_file(sock, framer, candidate)
+                        if ok:
+                            break        # downloadcf stops at the first hit
+                    sock.sendall(cli_response(result, True))
+                    continue
+                print(f"<- CMD -> {text.strip()!r}")
+                sock.sendall(cli_response(text, True))
+        except socket.timeout:
+            pass
+        finally:
+            if _tunnel_open:
+                sock.settimeout(0.5)
+
+        if not _tunnel_open:
+            time.sleep(1.0)
+
+    sock.close()
     print("done")
     return 0
 
@@ -541,8 +513,6 @@ def main() -> int:
     p.add_argument("--station", type=int, default=1001)
     p.add_argument("--secret", default="")
     p.add_argument("--duration", type=float, default=60.0, help="seconds to run")
-    p.add_argument("--legacy-download", action="store_true",
-                   help="replay the pre-B1 download dance (disconnect + deferred answer)")
     p.add_argument("--role", choices=sorted(ROLE_NAMES), default="unset",
                    help="IDENT role byte. "
                         "'rover' also needs --rover-fix to be useful.")
@@ -569,7 +539,7 @@ def main() -> int:
 
     try:
         return run(args.host, args.port, args.station, args.secret, args.duration,
-                   args.legacy_download, ROLE_NAMES[args.role], rover_fix)
+                   ROLE_NAMES[args.role], rover_fix)
     except KeyboardInterrupt:
         return 0
 

@@ -333,7 +333,7 @@ class RoverRouter:
             # A file transfer owns the socket for its whole duration. Queueing
             # behind it would deliver a burst of stale corrections the moment it
             # finished, which is worse than the gap.
-            if session.file_transfer_active or session.transfer_in_progress:
+            if session.file_transfer_active:
                 self.dropped_offline += 1
                 continue
 

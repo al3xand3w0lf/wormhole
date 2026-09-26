@@ -77,9 +77,9 @@ def load_env_file() -> dict:
 ALLOWLIST = ("whoami", "sysinfo", "listfiles", "download", "downloadcf", "downloadfw",
              "upload", "reboot", "fsdcard")
 
-# download/downloadfw pause the stream, transfer over the modem, then reconnect to
-# answer — the server waits up to STREAM_CLI_TRANSFER_TIMEOUT (default 600 s) for
-# that. Our HTTP read must outlast the server's wait, or we'd give up first.
+# download/downloadfw answer only once the file has crossed the stream — the server
+# waits up to STREAM_CLI_TRANSFER_TIMEOUT (default 600 s) for that. Our HTTP read
+# must outlast the server's wait, or we'd give up first.
 NORMAL_HTTP_TIMEOUT = 70.0
 TRANSFER_HTTP_TIMEOUT = 620.0
 
@@ -165,7 +165,7 @@ def send_cmd(station: int, cmd: str, ctx, body_timeout: Optional[float]) -> Opti
         body["timeout"] = body_timeout
         http_timeout = body_timeout + 10.0
     if is_download_class(cmd):
-        print("  (download-class command — device pauses, transfers, reconnects; this can take a while)")
+        print("  (download-class command — answers once the file has crossed the stream; this can take a while)")
     try:
         result = _post(f"/stream/{station}/cli", body, ctx, http_timeout)
         return result.get("response", "")

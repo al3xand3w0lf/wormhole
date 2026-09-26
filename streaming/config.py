@@ -62,7 +62,7 @@ STREAM_RAW_MAX_AGE_H = int(os.getenv("STREAM_RAW_MAX_AGE_H", "168"))  # 7 days
 STREAM_IDLE_TIMEOUT = int(os.getenv("STREAM_IDLE_TIMEOUT", "180"))
 
 STREAM_CLI_TIMEOUT = int(os.getenv("STREAM_CLI_TIMEOUT", "60"))
-# download/downloadfw make the device close the socket, transfer, and reconnect.
+# download/downloadfw answer only once the file has crossed the stream.
 STREAM_CLI_TRANSFER_TIMEOUT = int(os.getenv("STREAM_CLI_TRANSFER_TIMEOUT", "600"))
 
 # A connection must identify itself (IDENT frame) within this many bytes.
