@@ -64,18 +64,22 @@ crashing or being restarted does not touch the others.
 | Process | Port | Reachable from | Role |
 |---|---|---|---|
 | `streaming_server.py` | **N** | Internet (devices) | Streaming mode: live byte stream, one socket per station |
-| ↳ its admin API | **N+1** | **loopback only** | Status + remote CLI — reached through an SSH tunnel, never opened |
+| `server.py` | **N+1** | Internet (devices) | Batch mode: devices upload finished files |
 | Millipede caster | **N+2** | Internet (rovers), optional | NTRIP caster: rovers pull the corrections a base pushed in |
-| `server.py` | **N+3** | Internet (devices) | Batch mode: devices upload finished files |
+| ↳ admin API of the streaming server | **N+3** | **loopback only** | Status + remote CLI — reached through an SSH tunnel, never opened |
 
 **N** is the instance number and its streaming port, e.g. `11000`. The directory,
-the service names and all four ports follow from it:
+the service names and all four ports follow from it. The public ports are one
+range, N..N+2; the admin port, which is never opened, comes last:
 
-| Instance | Directory | Services | Stream | Admin | Caster | Batch |
+| Instance | Directory | Services | Stream | Batch | Caster | Admin |
 |---|---|---|---|---|---|---|
-| 9000 | `/opt/wormhole_9000` | `wormhole-9000-{stream,batch,caster}` | 9000 | 9001 | 9002 | 9003 |
-| 10000 | `/opt/wormhole_10000` | `wormhole-10000-…` | 10000 | 10001 | 10002 | 10003 |
+| 10000 | `/opt/wormhole_10000` | `wormhole-10000-{stream,batch,caster}` | 10000 | 10001 | 10002 | 10003 |
 | 11000 | `/opt/wormhole_11000` | `wormhole-11000-…` | 11000 | 11001 | 11002 | 11003 |
+
+> Instances set up before 2026-10-17 use the old order — admin N+1, batch N+3
+> (e.g. 9000/9001/9002/9003). They keep it; nothing has to move. Their devices
+> carry the ports in their own configuration.
 
 Pick an N whose four ports are all free (step 0 checks that). Use steps of 1000.
 
@@ -90,7 +94,7 @@ N=11000                              # instance number = streaming port
 SERVER_IP=203.0.113.10            # this server's public address (for the device config)
 
 DIR=/opt/wormhole_$N
-ADMIN=$((N+1)); CASTER=$((N+2)); BATCH=$((N+3))
+BATCH=$((N+1)); CASTER=$((N+2)); ADMIN=$((N+3))
 echo "instance $N in $DIR — stream $N, admin $ADMIN, caster $CASTER, batch $BATCH"
 ```
 
@@ -199,7 +203,7 @@ What the two secrets are for:
 You read them back later with `grep '^API_KEY=' "$DIR/.env"` — no need to write
 them down anywhere else.
 
-The admin API (port N+1) stays on `127.0.0.1`. It can reboot a device and push
+The admin API (port N+3) stays on `127.0.0.1`. It can reboot a device and push
 firmware; do not widen the bind address. You reach it through an SSH tunnel from
 your PC (step 10).
 
@@ -355,7 +359,7 @@ ss -ltnp | grep -E ":($N|$ADMIN|$CASTER|$BATCH) "
 journalctl -u wormhole-$N-stream -n 20 --no-pager
 ```
 
-All `active`; the four ports listening — N, N+2 and N+3 on `0.0.0.0`, N+1 on
+All `active`; the four ports listening — N, N+1 and N+2 on `0.0.0.0`, N+3 on
 `127.0.0.1` only. With the caster enabled the stream log shows
 `ntrip caster push: 127.0.0.1:<N+2>, stations [1001]`.
 
@@ -384,7 +388,7 @@ ufw allow $CASTER/tcp comment "wormhole $N caster (rovers)"   # only with step 6
 ufw status | grep -E "^($N|$CASTER|$BATCH)/"
 ```
 
-**Never open N+1** (admin).
+**Never open N+3** (admin).
 
 If the server sits behind a provider firewall (IONOS/1&1 cloud panel, Hetzner,
 AWS security group, …) open the same ports there too — ufw alone is then not enough.
@@ -423,18 +427,18 @@ watch -n5 "du -sh $DIR/data/incoming_stream/*/*"
 💻 **your PC** — *not* in the SSH session on the server. Example for instance 11000:
 
 ```bash
-ssh -L 11001:localhost:11001 root@203.0.113.10
+ssh -L 11003:localhost:11003 root@203.0.113.10
 ```
 
-Keep that window open. While it is, `http://localhost:11001/…` **on your PC** is the
+Keep that window open. While it is, `http://localhost:11003/…` **on your PC** is the
 admin API of that instance, e.g. (💻 your PC, second terminal):
 
 ```bash
-curl -s -H "X-API-Key: PASTE_API_KEY" http://localhost:11001/stream/stations
+curl -s -H "X-API-Key: PASTE_API_KEY" http://localhost:11003/stream/stations
 ```
 
 Close the tunnel with `exit`. Typed on the server, the same `ssh -L` command opens
-an SSH session from the server to itself and **grabs port N+1 on the server** — the
+an SSH session from the server to itself and **grabs port N+3 on the server** — the
 streaming service can then no longer bind its admin port (see *Troubleshooting*).
 
 ---
@@ -473,7 +477,7 @@ own sample config. See `caster/README.md`.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `syntax error near unexpected token 'newline'` | A literal `<placeholder>` was typed | Replace the whole `<…>` including the brackets |
-| `address already in use` in the stream log, admin API not answering | Something else holds port N+1 — typically an `ssh -L` that was run **on the server** | `ss -ltnp \| grep :$ADMIN` shows the owner; close that SSH session (`exit`) or `kill` the `ssh -L` pid, then `systemctl restart wormhole-$N-stream` |
+| `address already in use` in the stream log, admin API not answering | Something else holds port N+3 — typically an `ssh -L` that was run **on the server** | `ss -ltnp \| grep :$ADMIN` shows the owner; close that SSH session (`exit`) or `kill` the `ssh -L` pid, then `systemctl restart wormhole-$N-stream` |
 | `curl` to the admin API: `401 Invalid API key` | Wrong or missing `X-API-Key` | Use the key from **this** instance's `.env` |
 | Device connects but remote CLI is refused | `streaming_cli_secret` on the device ≠ `STREAM_CLI_SECRET` | Re-print step 9 and fix `CONFIG.TXT` |
 | Remote CLI: `auth failed`, although `.env` and `CONFIG.TXT` carry the same secret | The secret is longer than 31 characters; the device silently keeps only the first 31 | Cut `STREAM_CLI_SECRET` in `.env` to its first 31 characters, restart the stream service. That value already matches the device, so `CONFIG.TXT` does not need to change |

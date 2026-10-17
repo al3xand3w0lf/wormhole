@@ -31,20 +31,22 @@ ports dialog:
 | Port | Service | Reach | What for |
 |---|---|---|---|
 | N | streaming | public | devices hold their live TCP stream here |
-| N+1 | admin API | **127.0.0.1 only**, never opened | remote CLI (`stream_cli`), device config generator, station list — from another machine through an SSH tunnel (`ssh -L N+1:127.0.0.1:N+1 user@host`) |
+| N+1 | batch upload | public | devices upload finished files over HTTP(S) and download config/firmware |
 | N+2 | NTRIP caster | public | rovers pull corrections, bases are published as mountpoints |
-| N+3 | batch upload | public | devices upload finished files over HTTP(S) and download config/firmware |
+| N+3 | admin API | **127.0.0.1 only**, never opened | remote CLI (`stream_cli`), device config generator, station list — from another machine through an SSH tunnel (`ssh -L N+3:127.0.0.1:N+3 user@host`) |
 | 21 + 50000–50100 | FTP/FTPS (vsftpd) | public | FTP uploads/downloads into the same `data/` tree; **shared by all instances** on the host |
 
-The ports of components you do not select stay unused, but the block keeps its
-shape, so the next instance does not collide. Each port can be changed on the
+The public ports form one range, N..N+2 (one firewall rule, one port forward on a
+router); the local admin port is last. The ports of components you do not select
+stay unused, but the block keeps its shape, so the next instance does not collide. Each port can be changed on the
 second ports screen; the name stays N. The confirm screen and
 `INSTALL_SUMMARY.txt` show this overview for the instance being installed.
 
-Until 2026-10-17 the name followed the main service's port, so a batch-only block
+Until 2026-10-17 the block was stream N, admin N+1, caster N+2, batch N+3, and the
+name followed the main service's port, so a batch-only block
 13000 became `wormhole_13003`, and the FTP account followed the directory name. An
-instance installed that way keeps its name (the installer finds it in the
-registry); the FTP account is the one in its `.env`.
+instance installed that way keeps its name and its ports (the installer finds it
+in the registry); the FTP account is the one in its `.env`.
 
 ## What one install produces
 
@@ -71,7 +73,7 @@ registry); the FTP account is the one in its `.env`.
    `data/`, FTPS optional, firewall through ufw when the installer manages it.
 3. **Ports**: a block is suggested from the first base port (9000, 10000, …) whose
    four ports are all free and not reserved by another registered instance;
-   stream = B, admin = B+1, caster = B+2, batch = B+3; B also names the
+   stream = B, batch = B+1, caster = B+2, admin = B+3; B also names the
    instance (see "Names and ports"). Each port can be changed one by one. Continuing validates them: 1024–65535, no duplicates, not
    listening (`ss`), not claimed by another instance.
 4. **Service user**: the current user (default) or a dedicated system user
@@ -121,7 +123,7 @@ PUBLIC_HOST=stations.example.org
 BASE_STATIONS=1001,1002
 RAW_MAX_AGE_H=168
 SSL_MODE=none              # selfsigned | letsencrypt (+ LE_DOMAIN, LE_EMAIL)
-FW_OPEN=12000 12002 12003  # ports to open in ufw
+FW_OPEN=12000 12001 12002  # ports to open in ufw (stream, batch, caster)
 FW_ACTIVATE=no
 REPO_URL=https://github.com/al3xand3w0lf/wormhole.git
 REPO_BRANCH=main

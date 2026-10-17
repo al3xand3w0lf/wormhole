@@ -317,19 +317,22 @@ port block N -> instance wormhole_N, directory wormhole_N, services
 wormhole-N-stream / -batch / -caster, FTP account wormhole_N_ftp.
 
   N    streaming     devices connect here (public)
-  N+1  admin API     remote CLI and config generator; 127.0.0.1 only,
-                     reached through an SSH tunnel, never opened
+  N+1  batch upload  devices upload finished files over HTTP(S) (public)
   N+2  NTRIP caster  rovers pull corrections here (public)
-  N+3  batch upload  devices upload finished files over HTTP(S) (public)
+  N+3  admin API     remote CLI and config generator; 127.0.0.1 only,
+                     reached through an SSH tunnel, never opened
 
-Ports of components you do not select stay unused. FTP/FTPS always uses
+The public ports are one range, N..N+2 - one firewall rule, one port
+forward. Ports of components you do not select stay unused. FTP/FTPS always uses
 port 21 (shared by all instances on this host).
 You can change each port individually on the next screen; the name stays N." "$b") || return 1
         [[ "$b" =~ ^[0-9]+$ ]] || b=$(suggest_base)
         STREAM_PORT=${ANSWER[STREAM_PORT]:-$b}
-        ADMIN_PORT=${ANSWER[ADMIN_PORT]:-$((b+1))}
+        # block layout since 2026-10-17: public ports first (N, N+1, N+2), admin last;
+        # instances installed before keep admin N+1 / batch N+3 (registry)
+        BATCH_PORT=${ANSWER[BATCH_PORT]:-$((b+1))}
         CASTER_PORT=${ANSWER[CASTER_PORT]:-$((b+2))}
-        BATCH_PORT=${ANSWER[BATCH_PORT]:-$((b+3))}
+        ADMIN_PORT=${ANSWER[ADMIN_PORT]:-$((b+3))}
         BASE_PORT=$b
         # answers file with single ports but no BASE_PORT: the main service names it
         if [ -z "${ANSWER[BASE_PORT]:-}" ] && [ -n "${ANSWER[STREAM_PORT]:-}${ANSWER[BATCH_PORT]:-}" ]; then
@@ -342,10 +345,10 @@ You can change each port individually on the next screen; the name stays N." "$b
             return 0
         fi
         local items=()
-        [ "$COMP_STREAMING" = yes ] && items+=(stream "Streaming (devices)      $STREAM_PORT  public"
-                                              admin  "Admin API / remote CLI   $ADMIN_PORT  local only")
-        [ "$COMP_CASTER" = yes ] && items+=(caster "NTRIP caster (rovers)    $CASTER_PORT  public")
+        [ "$COMP_STREAMING" = yes ] && items+=(stream "Streaming (devices)      $STREAM_PORT  public")
         [ "$COMP_BATCH" = yes ] && items+=(batch "Batch uploads (HTTP)     $BATCH_PORT  public")
+        [ "$COMP_CASTER" = yes ] && items+=(caster "NTRIP caster (rovers)    $CASTER_PORT  public")
+        [ "$COMP_STREAMING" = yes ] && items+=(admin "Admin API / remote CLI   $ADMIN_PORT  local only")
         items+=(ok "Continue with these ports")
         choice=$(ask_menu PORT_MENU "Ports of ${NAME:-wormhole_$BASE_PORT}. Select one to change it.
 public = devices or rovers reach it from outside; local only = this machine$( [ "$COMP_FTP" = yes ] && printf '\nFTP/FTPS: port 21 + passive 50000-50100 (vsftpd, shared)')" ok "${items[@]}") || return 1
@@ -379,10 +382,10 @@ port_role() {
 
 port_table() {   # the instance's ports with role and reach, for the confirm dialog and the summary
     echo "  Ports"
-    [ "$COMP_STREAMING" = yes ] && printf '    %-6s %-13s %s\n' "$STREAM_PORT" streaming "public - devices stream here" \
-                                  "$ADMIN_PORT" "admin API" "127.0.0.1 only - remote CLI, config generator (SSH tunnel)"
-    [ "$COMP_CASTER" = yes ] && printf '    %-6s %-13s %s\n' "$CASTER_PORT" "NTRIP caster" "public - rovers pull corrections"
+    [ "$COMP_STREAMING" = yes ] && printf '    %-6s %-13s %s\n' "$STREAM_PORT" streaming "public - devices stream here"
     [ "$COMP_BATCH" = yes ] && printf '    %-6s %-13s %s\n' "$BATCH_PORT" "batch upload" "public - devices upload files ($( [ "$SSL_MODE" = none ] && echo http || echo https))"
+    [ "$COMP_CASTER" = yes ] && printf '    %-6s %-13s %s\n' "$CASTER_PORT" "NTRIP caster" "public - rovers pull corrections"
+    [ "$COMP_STREAMING" = yes ] && printf '    %-6s %-13s %s\n' "$ADMIN_PORT" "admin API" "127.0.0.1 only - remote CLI, config generator (SSH tunnel)"
     [ "$COMP_FTP" = yes ] && printf '    %-6s %-13s %s\n' 21 "FTP/FTPS" "public - vsftpd, passive 50000-50100, shared by all instances"
     return 0
 }
