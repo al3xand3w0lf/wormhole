@@ -35,7 +35,10 @@ opens the same menu.
 1. **System check**: OS, systemd, Python ≥ 3.10 (the code uses `X | None` at
    runtime, so 3.9 fails on import), architecture (32-bit ARM: warning), internet,
    NTP sync, free disk, ufw state. A failure stops the install; a warning asks first.
-2. **Components**: streaming, NTRIP caster, batch. The caster implies streaming.
+2. **Components**: streaming, NTRIP caster, batch, ftp (off by default). The caster
+   implies streaming; ftp implies batch — it is `tools/setup-ftp.sh`
+   (`ftp-ftps-server-2026-10-17.md`): vsftpd, one account per instance chrooted to
+   `data/`, FTPS optional, firewall through ufw when the installer manages it.
 3. **Ports**: a block is suggested from the first base port (9000, 10000, …) whose
    four ports are all free and not reserved by another registered instance;
    stream = B, admin = B+1, caster = B+2, batch = B+3. Each port can be changed
@@ -80,7 +83,7 @@ bash install.sh --unattended answers.env
 ```
 
 ```ini
-COMPONENTS=streaming caster batch
+COMPONENTS=streaming caster batch   # + ftp for FTP/FTPS (tools/setup-ftp.sh)
 BASE_PORT=12000            # or STREAM_PORT / ADMIN_PORT / CASTER_PORT / BATCH_PORT
 SERVICE_USER=current       # or system
 INSTALL_DIR=/opt/wormhole_12000
@@ -116,6 +119,8 @@ on demand (`install.sh test <name>`, or "Run the server test" in the menu):
 - a batch test upload, found in `/uploads`, then deleted;
 - the caster answers with a sourcetable (`ENDSOURCETABLE`; empty is normal with no
   base pushing);
+- with ftp: the self test of `tools/setup-ftp.sh --test` (lines prefixed `ftp:`) —
+  vsftpd, account, chroot, FTP and FTPS upload/download round trips;
 - `.env` and `data/` are writable by the service user, because the caster
   auto-provisioning writes `.env` back at runtime;
 - optionally the full `pytest` suite.
@@ -140,8 +145,8 @@ CLI secret, raw retention, HTTPS, firewall) · install summary · uninstall.
   devices need the new streaming port. The instance keeps its name.
 - **Settings → trusted bases** only ever *adds* to `STREAM_CASTER_STATIONS`, in
   line with the no-automatic-removal rule of the caster auto-provisioning.
-- **Uninstall** removes the units, the firewall rules, the Let's Encrypt hook and
-  the registry entry. Deleting the directory with all recorded data takes a
+- **Uninstall** removes the units, the firewall rules, the Let's Encrypt hook,
+  the FTP account (`setup-ftp.sh --remove`; vsftpd stays) and the registry entry. Deleting the directory with all recorded data takes a
   separate confirmation: you must type the instance name.
 
 CLI equivalents: `install.sh status|test|update|restart|uninstall <name>

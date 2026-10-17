@@ -34,7 +34,8 @@ Receives and serves files via raw HTTP POST/GET — no multipart/form-data requi
 - Raw binary upload/download
 - **Chunked upload with server-side reassembly** — a device whose file is too large for its modem buffer splits it into pieces; the server writes each at its byte offset and reassembles the original file (see below)
 - API key authentication (`X-API-Key` header)
-- Optional HTTPS with self-signed or Let's Encrypt certificates
+- Optional HTTPS with self-signed or Let's Encrypt certificates; `SSL_PORT` adds an HTTPS port next to a plain-HTTP one in the same process
+- Optional FTP/FTPS for devices that upload over FTP: `tools/setup-ftp.sh` (vsftpd, one chrooted account per instance, same `data/` tree) — see [docs/ftp-ftps-server-2026-10-17.md](docs/ftp-ftps-server-2026-10-17.md)
 - File collision handling (automatic rename)
 - Filename sanitization and extension blocking
 - Per-request IDs (`X-Request-ID` header, included in every log line)
@@ -68,6 +69,7 @@ python3 server.py
 ```bash
 python3 server.py --port 8080    # custom port
 python3 server.py --no-ssl       # disable HTTPS
+python3 server.py --no-ssl --ssl-port 9443   # plain HTTP on PORT + HTTPS on 9443, one process
 ```
 
 ### SSL Certificates
@@ -89,6 +91,7 @@ See [.env.example](.env.example) for all options:
 | `DOWNLOAD_DIR` | `./data/outgoing` | Directory for files to serve |
 | `SSL_CERTFILE` | `./cert.pem` | SSL certificate path |
 | `SSL_KEYFILE` | `./key.pem` | SSL private key path |
+| `SSL_PORT` | `0` (off) | Additional HTTPS port served by the same process; refuses to start without the certificate |
 | `MAX_FILE_SIZE` | `52428800` | Max size per single request / chunk (50 MB) |
 | `MAX_ASSEMBLED_SIZE` | `524288000` | Max size of a chunk-reassembled file (500 MB) |
 | `PARTIAL_MAX_AGE_H` | `48` | Age (hours) after which abandoned `.partial` files are swept at startup |
@@ -163,6 +166,8 @@ curl "https://<host>:<port>/uploads"        -H "X-API-Key: <key>"   # received u
 ```
 
 > For plain HTTP (no TLS), use `http://` and start the server with `--no-ssl`.
+> To move devices to TLS one by one, keep `--no-ssl` on `PORT` and set `SSL_PORT`: the same
+> server then answers `https://` on that port too (same API key, data and log).
 
 ## Testing
 
@@ -509,10 +514,11 @@ wormhole/
 ├── replay.py                        # Streaming: replay a raw capture
 ├── fake_device.py                   # Streaming: device emulator
 ├── caster/                          # Bundled NTRIP caster (Millipede): setup.sh, generate_config.py
-├── tools/                           # ntrip_relay.py (relay a mountpoint), gnss_tunnel.py + ubx_check.py (GNSS maintenance tunnel)
+├── tools/                           # ntrip_relay.py (relay a mountpoint), gnss_tunnel.py + ubx_check.py (GNSS maintenance tunnel), setup-ftp.sh (FTP/FTPS)
 ├── configgen/                       # Device configuration generator; data/ holds an EXAMPLE schema + role templates
 ├── install.sh                       # Guided installer / manage menu (whiptail)
 ├── docs/installer-2026-09-23.md     # Installer documentation
+├── docs/ftp-ftps-server-2026-10-17.md  # FTP/FTPS server (tools/setup-ftp.sh)
 ├── stream_cli/                      # Interactive terminal over the admin API (stdlib only)
 ├── tests/                           # Streaming: pytest suite
 ├── pytest.ini

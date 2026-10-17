@@ -21,9 +21,13 @@ data/incoming_stream/*
 !data/incoming/.gitkeep
 !data/outgoing/.gitkeep
 !data/incoming_stream/.gitkeep
+# local copies of firmware / outgoing files, e.g. a bench backup
+data/outgoing_*/
 
 # Logs
 *.log
+# rotated logs (streaming.log.1, server.log.2, ...)
+*.log.[0-9]*
 
 # Bundled NTRIP caster: build output + generated config (mountpoint passwords,
 # derived from .env) - see caster/README.md. Never the setup tooling itself.

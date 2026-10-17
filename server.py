@@ -9,6 +9,7 @@ Usage:
     python server.py                    # Start with config from .env
     python server.py --port 8080        # Override port
     python server.py --no-ssl           # Disable SSL
+    python server.py --ssl-port 9443    # Extra HTTPS listener next to PORT
 """
 
 import os
@@ -49,6 +50,10 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 SSL_CERTFILE = os.getenv("SSL_CERTFILE", str(BASE_DIR / "cert.pem"))
 SSL_KEYFILE = os.getenv("SSL_KEYFILE", str(BASE_DIR / "key.pem"))
+# Optional second listener: HTTPS on SSL_PORT in the same process, while PORT keeps
+# its own mode (--no-ssl or not). Lets devices move to TLS one by one without a
+# second service, log or data directory. 0 = off.
+SSL_PORT = int(os.getenv("SSL_PORT", "0"))
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50 MB per single request/chunk
 # Chunked uploads (device splits a file too large for its modem buffer into
 # UFS-sized pieces that the server reassembles): the *reassembled* file may be
@@ -190,6 +195,33 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+async def _final_chunk_already_done(request, safe_name, offset, total_size):
+    """True when <safe_name> exists with total_size bytes and the body of this request
+    equals its bytes at offset up to the end - i.e. the final chunk was already applied.
+    Reads the (single-chunk sized) body into memory; any mismatch -> False."""
+    final_path = UPLOAD_DIR / safe_name
+    try:
+        if not final_path.is_file() or final_path.stat().st_size != total_size:
+            return False
+        body = bytearray()
+        stream = request.stream().__aiter__()
+        while True:
+            try:
+                part = await asyncio.wait_for(stream.__anext__(), timeout=UPLOAD_CHUNK_TIMEOUT)
+            except StopAsyncIteration:
+                break
+            body += part
+            if len(body) > MAX_FILE_SIZE or offset + len(body) > total_size:
+                return False
+        if offset + len(body) != total_size:
+            return False
+        async with aiofiles.open(final_path, "rb") as f:
+            await f.seek(offset)
+            return await f.read(len(body)) == bytes(body)
+    except (OSError, asyncio.TimeoutError):
+        return False
+
+
 async def _handle_chunk_upload(request, device_id, safe_name,
                                chunk_index, chunk_count, offset, total_size):
     """Reassemble a chunked upload by writing each chunk at its byte offset.
@@ -216,6 +248,22 @@ async def _handle_chunk_upload(request, device_id, safe_name,
         mode = "wb"          # first chunk creates/truncates
     else:
         if not partial_path.exists():
+            # The final chunk repeated after its 201 got lost on the way back: the file is
+            # already complete. Answer 201 again instead of 409 - a 409 would make the
+            # device re-send the whole file and the server keep a second copy.
+            if is_final:
+                done = await _final_chunk_already_done(request, safe_name, offset, total_size)
+                if done:
+                    logger.info(f"Final chunk {chunk_index + 1}/{chunk_count} of {safe_name} repeated "
+                                f"by {device_id}: already complete, 201 again")
+                    return JSONResponse(status_code=201, content={
+                        "status": "ok",
+                        "filename": safe_name,
+                        "size": total_size,
+                        "device_id": device_id,
+                        "chunks": chunk_count,
+                        "repeated": True,
+                    })
             # Lost partial (server restart / swept) — device must restart from chunk 0.
             logger.warning(f"Chunk {chunk_index} for {safe_name} but no .partial — request restart")
             raise HTTPException(status_code=409, detail="partial missing, restart from chunk 0")
@@ -448,6 +496,8 @@ if __name__ == "__main__":
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--no-ssl", action="store_true", help="Disable SSL")
+    parser.add_argument("--ssl-port", type=int, default=SSL_PORT,
+                        help="Additional HTTPS port served by the same process (0 = off)")
     args = parser.parse_args()
 
     kwargs = {
@@ -461,7 +511,8 @@ if __name__ == "__main__":
 
     cert = Path(SSL_CERTFILE)
     key = Path(SSL_KEYFILE)
-    if not args.no_ssl and cert.exists() and key.exists():
+    have_cert = cert.exists() and key.exists()
+    if not args.no_ssl and have_cert:
         kwargs["ssl_certfile"] = str(cert)
         kwargs["ssl_keyfile"] = str(key)
         logger.info(f"HTTPS server starting on {args.host}:{args.port}")
@@ -471,4 +522,29 @@ if __name__ == "__main__":
     logger.info(f"Upload dir:   {UPLOAD_DIR}")
     logger.info(f"Download dir: {DOWNLOAD_DIR}")
 
-    uvicorn.run(**kwargs)
+    if not args.ssl_port:
+        uvicorn.run(**kwargs)
+    else:
+        # Fail loudly instead of silently serving plain HTTP on the "HTTPS" port.
+        if not have_cert:
+            logger.error(f"--ssl-port {args.ssl_port}: certificate missing ({cert}, {key})")
+            raise SystemExit(1)
+        if WORKERS > 1:
+            logger.error("--ssl-port needs WORKERS=1 (two listeners in one process)")
+            raise SystemExit(1)
+        if args.ssl_port == args.port:
+            logger.error(f"--ssl-port {args.ssl_port} equals --port")
+            raise SystemExit(1)
+        kwargs.pop("workers")
+        tls_kwargs = dict(kwargs, port=args.ssl_port,
+                          ssl_certfile=str(cert), ssl_keyfile=str(key))
+        logger.info(f"HTTPS server starting on {args.host}:{args.ssl_port} (additional)")
+        servers = [uvicorn.Server(uvicorn.Config(**kw)) for kw in (kwargs, tls_kwargs)]
+
+        # Each Server.serve() captures SIGINT/SIGTERM and re-raises it on exit after
+        # restoring the previous handler - the one of the other server - so one
+        # signal shuts down both listeners in turn.
+        async def _serve_all():
+            await asyncio.gather(*(srv.serve() for srv in servers))
+
+        asyncio.run(_serve_all())

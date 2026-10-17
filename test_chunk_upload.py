@@ -89,6 +89,22 @@ r = client.post(url(device_id="dev4", filename="nopart.ubx", chunk_index=1, chun
                     offset=CAP, total_size=2000), headers=H, content=os.urandom(1000))
 check("missing partial -> 409", r.status_code == 409)
 
+print("== final chunk repeated after its 201 got lost -> 201 again, no second copy ==")
+d = os.urandom(2500)
+codes = send_chunks("dev6", "lost201.ubx", d)
+check("first pass [202, 202, 201]", codes == [202, 202, 201])
+r = client.post(url(device_id="dev6", filename="lost201.ubx", chunk_index=2, chunk_count=3,
+                    offset=2 * CAP, total_size=len(d)), headers=H, content=d[2 * CAP:])
+check("repeated final chunk -> 201", r.status_code == 201 and r.json().get("repeated") is True)
+check("no second copy", sorted(p.name for p in UP.glob("lost201*")) == ["lost201.ubx"])
+check("file unchanged", (UP / "lost201.ubx").read_bytes() == d)
+r = client.post(url(device_id="dev6", filename="lost201.ubx", chunk_index=2, chunk_count=3,
+                    offset=2 * CAP, total_size=len(d)), headers=H, content=os.urandom(500))
+check("different final chunk -> still 409", r.status_code == 409)
+r = client.post(url(device_id="dev6", filename="lost201.ubx", chunk_index=1, chunk_count=3,
+                    offset=CAP, total_size=len(d)), headers=H, content=d[CAP:2 * CAP])
+check("repeated non-final chunk without partial -> 409", r.status_code == 409)
+
 print("== assembled size mismatch on final chunk -> 422 ==")
 d = os.urandom(2000)
 client.post(url(device_id="dev5", filename="mm.ubx", chunk_index=0, chunk_count=2,

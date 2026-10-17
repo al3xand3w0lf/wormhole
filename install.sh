@@ -2,8 +2,9 @@
 # Wormhole installer - installs, tests, updates and removes wormhole instances.
 #
 # One run of "Install" sets up one complete instance: code, Python environment,
-# .env with generated secrets, the optional bundled NTRIP caster, systemd units,
-# firewall rules and a server test. Every further instance on the same host is
+# .env with generated secrets, the optional bundled NTRIP caster, the optional
+# FTP/FTPS server (vsftpd, tools/setup-ftp.sh), systemd units, firewall rules and
+# a server test. Every further instance on the same host is
 # one more run with its own port block, directory and units.
 #
 #   bash install.sh                        menu (install / manage)
@@ -198,13 +199,13 @@ print_and_wait() {   # file [title]
 
 # The install-time answers are kept too, so an interrupted install resumes with
 # them instead of asking again.
-INSTANCE_VARS=(NAME DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER STREAM_PORT
+INSTANCE_VARS=(NAME DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP STREAM_PORT
                ADMIN_PORT CASTER_PORT BATCH_PORT FW_PORTS SSL_MODE LE_DOMAIN LE_EMAIL
                REPO_URL REPO_BRANCH PUBLIC_HOST BASE_STATIONS RAW_MAX_AGE_H FW_ENABLED
                FW_ACTIVATE FW_OPEN INSTALL_DONE)
 
 reset_instance() {
-    NAME="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes
+    NAME="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes COMP_FTP=no
     STREAM_PORT="" ADMIN_PORT="" CASTER_PORT="" BATCH_PORT="" FW_PORTS="" SSL_MODE=none
     LE_DOMAIN="" LE_EMAIL="" REPO_URL="$DEFAULT_REPO_URL" REPO_BRANCH="$DEFAULT_BRANCH"
     PUBLIC_HOST="" BASE_STATIONS="" RAW_MAX_AGE_H=168 FW_ENABLED=no FW_ACTIVATE=no FW_OPEN=""
@@ -594,6 +595,19 @@ st_caster() {
     py caster/generate_config.py
 }
 
+# FTP/FTPS for batch devices that upload over FTP instead of HTTP: one vsftpd per
+# host, one account per instance chrooted to data/ (uploads -> incoming/,
+# downloads <- outgoing/). All of it lives in tools/setup-ftp.sh, which also runs
+# on its own (docs/ftp-ftps-server-2026-10-17.md).
+ftp_script() { echo "$DIR/tools/setup-ftp.sh"; }
+
+st_ftp() {
+    local fw=none
+    [ "${FW_ENABLED:-no}" = yes ] && fw=ufw
+    in_dir test -f tools/setup-ftp.sh || { echo "tools/setup-ftp.sh missing in $DIR"; return 1; }
+    bash "$(ftp_script)" --dir "$DIR" --yes --firewall "$fw" ${PUBLIC_HOST:+--public-host "$PUBLIC_HOST"}
+}
+
 write_unit() {   # name description exec [extra]
     local tmp; tmp=$(mktemp)
     cat >"$tmp" <<EOF
@@ -812,6 +826,17 @@ server_test() {   # [with_pytest yes|no] [install yes|no]
         else tr_fail "NTRIP caster on port $CASTER_PORT does not answer"; fi
     fi
 
+    if [ "$COMP_FTP" = yes ]; then
+        local line
+        while IFS= read -r line; do
+            case "$line" in
+                "[ OK ] "*) tr_ok "ftp: ${line#\[ OK \] }" ;;
+                "[FAIL] "*) tr_fail "ftp: ${line#\[FAIL\] }" ;;
+                "[INFO] "*) tr_info "ftp: ${line#\[INFO\] }" ;;
+            esac
+        done < <(bash "$(ftp_script)" --dir "$DIR" --test 2>&1)
+    fi
+
     if in_dir test -w .env && in_dir test -w data; then tr_ok ".env and data/ writable by $SVC_USER"
     else tr_fail ".env or data/ not writable by $SVC_USER"; fi
 
@@ -856,6 +881,7 @@ write_summary() {
         [ "$COMP_STREAMING" = yes ] && echo "  $ADMIN_PORT/tcp  admin API - 127.0.0.1 only, never open it"
         [ "$COMP_CASTER" = yes ] && echo "  $CASTER_PORT/tcp  NTRIP caster - rovers pull corrections here"
         [ "$COMP_BATCH" = yes ] && echo "  $BATCH_PORT/tcp  batch uploads ($( [ "$SSL_MODE" = none ] && echo http || echo https))"
+        [ "$COMP_FTP" = yes ] && echo "  21/tcp + passive range  FTP / explicit FTPS (vsftpd, see below)"
         if [ -n "$FW_PORTS" ]; then echo "  Opened in ufw: $FW_PORTS"
         else echo "  Not opened by this installer - open $(public_ports | xargs) in your firewall."; fi
         echo "  Behind a router/NAT: forward $(public_ports | xargs) to this machine."
@@ -877,6 +903,18 @@ write_summary() {
             echo "  ssh -L $ADMIN_PORT:127.0.0.1:$ADMIN_PORT <user>@$host"
             echo "  then http://127.0.0.1:$ADMIN_PORT/config/  (device config generator)"
             echo "  Remote CLI on this server: cd $DIR && venv/bin/python stream_cli/stream_cli.py --list"
+            echo
+        fi
+        if [ "$COMP_FTP" = yes ]; then
+            echo "FTP/FTPS (CONFIG.TXT of a device that uploads over FTP)"
+            echo "  upload_protocol = 0"
+            echo "  server_ftp = $host"
+            echo "  port_ftp = 21"
+            echo "  ftp_tls = 1            (0 = plain FTP)"
+            echo "  folder_ftp = incoming"
+            echo "  folder_ftp_dl = /outgoing   (firmware with this key; older: see the FTP doc)"
+            echo "  user_ftp = $(env_get FTP_USER)"
+            echo "  passwd_ftp = $(env_get FTP_PASSWORD)"
             echo
         fi
         [ "$COMP_BATCH" = yes ] && echo "Files for devices to download: $DIR/data/outgoing" && echo
@@ -924,14 +962,20 @@ $PREFLIGHT_REPORT"
     comps=$(ask_checklist COMPONENTS "What should this instance run?" \
         streaming "Streaming server (live TCP stream from devices)" ON \
         caster    "NTRIP caster (bases publish, rovers pull)" ON \
-        batch     "Batch file server (devices upload finished files)" ON) || exit 0
-    COMP_STREAMING=no COMP_CASTER=no COMP_BATCH=no
+        batch     "Batch file server (devices upload finished files)" ON \
+        ftp       "FTP/FTPS server for batch devices (vsftpd, port 21)" OFF) || exit 0
+    COMP_STREAMING=no COMP_CASTER=no COMP_BATCH=no COMP_FTP=no
     [[ " $comps " == *" streaming "* ]] && COMP_STREAMING=yes
     [[ " $comps " == *" caster "* ]] && COMP_CASTER=yes
     [[ " $comps " == *" batch "* ]] && COMP_BATCH=yes
+    [[ " $comps " == *" ftp "* ]] && COMP_FTP=yes
     if [ "$COMP_CASTER" = yes ] && [ "$COMP_STREAMING" = no ]; then
         msg "The NTRIP caster is fed by the streaming server - streaming is switched on as well."
         COMP_STREAMING=yes
+    fi
+    if [ "$COMP_FTP" = yes ] && [ "$COMP_BATCH" = no ]; then
+        msg "FTP shares the file tree of the batch server (uploads in data/incoming, downloads from data/outgoing) - the batch server is switched on as well."
+        COMP_BATCH=yes
     fi
     [ "$COMP_STREAMING$COMP_BATCH" = nono ] && die "nothing selected"
 
@@ -1003,7 +1047,7 @@ Activate it now? SSH (22) is allowed first so this session is not locked out. Ev
 
   Directory:   $DIR
   User:        $SVC_USER
-  Components:  $(units | sed "s/^wormhole-[0-9]*-//" | xargs)
+  Components:  $(units | sed "s/^wormhole-[0-9]*-//" | xargs)$( [ "$COMP_FTP" = yes ] && echo " ftp")
   Ports:       $(selected_ports | tr '\n' ' ')
   Firewall:    $( [ "$FW_ENABLED" = yes ] && echo "open ${FW_OPEN:-nothing}" || echo "not managed (no ufw)")
   Public host: $PUBLIC_HOST
@@ -1035,7 +1079,7 @@ Change the code source to an https URL, or install with the current user."
 run_install_steps() {
     $UNATTENDED || clear
     echo "Installing $NAME - log: $LOG_FILE"; echo
-    STEP_N=0; STEP_TOTAL=$(( 9 + $( [ "$COMP_CASTER" = yes ] && echo 1 || echo 0 ) + $( [ "$SSL_MODE" != none ] && echo 1 || echo 0 ) ))
+    STEP_N=0; STEP_TOTAL=$(( 9 + $( [ "$COMP_CASTER" = yes ] && echo 1 || echo 0 ) + $( [ "$SSL_MODE" != none ] && echo 1 || echo 0 ) + $( [ "$COMP_FTP" = yes ] && echo 1 || echo 0 ) ))
     run_step "System packages"               st_packages
     run_step "Service user"                  st_user
     run_step "Code ($REPO_BRANCH)"           st_clone
@@ -1047,6 +1091,7 @@ run_install_steps() {
     [ "$COMP_CASTER" = yes ] && run_step "NTRIP caster (build + config)" st_caster
     run_step "Firewall"                      st_firewall
     run_step "systemd services"              st_units
+    [ "$COMP_FTP" = yes ] && run_step "FTP/FTPS server (vsftpd)" st_ftp
     INSTALL_DONE=yes
     run_step "Register instance"             st_register
     echo; echo "Running the server test ..."
@@ -1163,6 +1208,7 @@ print("  none yet" if not m else "\n".join("  %s%s" % (k, " (auto)" if v.get("au
         fi
         echo "Disk: $(in_dir du -sh data 2>/dev/null | cut -f1) in data/, $(df -h "$DIR" | awk 'NR==2 {print $4}') free"
         echo "Firewall ports opened: ${FW_PORTS:-none}"
+        [ "$COMP_FTP" = yes ] && echo "FTP: vsftpd $(systemctl is-active vsftpd), account $(env_get FTP_USER) (wormhole-setup -> test runs the FTP self test)"
         [ "$COMP_STREAMING" = yes ] && echo "Note: garbage/resyncs count per session - they start at 0 after every restart."
     } >"$f"
     show_file "$f" "Status - $NAME"
@@ -1237,6 +1283,7 @@ Stops and removes its services, firewall rules and registration. Recorded data i
     sudo_start
     remove_units
     firewall_remove
+    [ "$COMP_FTP" = yes ] && [ -f "$(ftp_script)" ] && bash "$(ftp_script)" --dir "$DIR" --remove >>"$LOG_FILE" 2>&1
     [ -f "$(le_hook_path)" ] && as_root rm -f "$(le_hook_path)"
     as_root rm -f "$REGISTRY_DIR/$NAME.conf"
     relink_setup
