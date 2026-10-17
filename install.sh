@@ -199,13 +199,13 @@ print_and_wait() {   # file [title]
 
 # The install-time answers are kept too, so an interrupted install resumes with
 # them instead of asking again.
-INSTANCE_VARS=(NAME DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP STREAM_PORT
+INSTANCE_VARS=(NAME BASE_PORT DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP STREAM_PORT
                ADMIN_PORT CASTER_PORT BATCH_PORT FW_PORTS SSL_MODE LE_DOMAIN LE_EMAIL
                REPO_URL REPO_BRANCH PUBLIC_HOST BASE_STATIONS RAW_MAX_AGE_H FW_ENABLED
                FW_ACTIVATE FW_OPEN INSTALL_DONE)
 
 reset_instance() {
-    NAME="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes COMP_FTP=no
+    NAME="" BASE_PORT="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes COMP_FTP=no
     STREAM_PORT="" ADMIN_PORT="" CASTER_PORT="" BATCH_PORT="" FW_PORTS="" SSL_MODE=none
     LE_DOMAIN="" LE_EMAIL="" REPO_URL="$DEFAULT_REPO_URL" REPO_BRANCH="$DEFAULT_BRANCH"
     PUBLIC_HOST="" BASE_STATIONS="" RAW_MAX_AGE_H=168 FW_ENABLED=no FW_ACTIVATE=no FW_OPEN=""
@@ -312,18 +312,29 @@ dialog_ports() {   # [exempt ports...]  - sets *_PORT; returns 1 on cancel
         b=$(suggest_base)
         b=$(ask_input BASE_PORT "Port block for this instance.
 
-Enter the first port; the others follow it:
-  first    streaming (devices connect here)
-  first+1  admin API (local only, never opened)
-  first+2  NTRIP caster
-  first+3  batch uploads
+Enter the first port of a block of four. The number also names the instance:
+port block N -> instance wormhole_N, directory wormhole_N, services
+wormhole-N-stream / -batch / -caster, FTP account wormhole_N_ftp.
 
-You can change each one individually on the next screen." "$b") || return 1
+  N    streaming     devices connect here (public)
+  N+1  admin API     remote CLI and config generator; 127.0.0.1 only,
+                     reached through an SSH tunnel, never opened
+  N+2  NTRIP caster  rovers pull corrections here (public)
+  N+3  batch upload  devices upload finished files over HTTP(S) (public)
+
+Ports of components you do not select stay unused. FTP/FTPS always uses
+port 21 (shared by all instances on this host).
+You can change each port individually on the next screen; the name stays N." "$b") || return 1
         [[ "$b" =~ ^[0-9]+$ ]] || b=$(suggest_base)
         STREAM_PORT=${ANSWER[STREAM_PORT]:-$b}
         ADMIN_PORT=${ANSWER[ADMIN_PORT]:-$((b+1))}
         CASTER_PORT=${ANSWER[CASTER_PORT]:-$((b+2))}
         BATCH_PORT=${ANSWER[BATCH_PORT]:-$((b+3))}
+        BASE_PORT=$b
+        # answers file with single ports but no BASE_PORT: the main service names it
+        if [ -z "${ANSWER[BASE_PORT]:-}" ] && [ -n "${ANSWER[STREAM_PORT]:-}${ANSWER[BATCH_PORT]:-}" ]; then
+            if [ "$COMP_STREAMING" = yes ]; then BASE_PORT=$STREAM_PORT; else BASE_PORT=$BATCH_PORT; fi
+        fi
     fi
     while true; do
         if $UNATTENDED; then
@@ -336,7 +347,8 @@ You can change each one individually on the next screen." "$b") || return 1
         [ "$COMP_CASTER" = yes ] && items+=(caster "NTRIP caster (rovers)    $CASTER_PORT  public")
         [ "$COMP_BATCH" = yes ] && items+=(batch "Batch uploads (HTTP)     $BATCH_PORT  public")
         items+=(ok "Continue with these ports")
-        choice=$(ask_menu PORT_MENU "Ports of this instance. Select one to change it." ok "${items[@]}") || return 1
+        choice=$(ask_menu PORT_MENU "Ports of ${NAME:-wormhole_$BASE_PORT}. Select one to change it.
+public = devices or rovers reach it from outside; local only = this machine$( [ "$COMP_FTP" = yes ] && printf '\nFTP/FTPS: port 21 + passive 50000-50100 (vsftpd, shared)')" ok "${items[@]}") || return 1
         case "$choice" in
             stream) v=$(ask_input X "Streaming port (devices connect here):" "$STREAM_PORT") && STREAM_PORT=$v ;;
             admin)  v=$(ask_input X "Admin API port (bound to 127.0.0.1, never opened in the firewall):" "$ADMIN_PORT") && ADMIN_PORT=$v ;;
@@ -363,6 +375,16 @@ port_role() {
         "$STREAM_PORT") echo "streaming" ;; "$CASTER_PORT") echo "ntrip-caster" ;;
         "$BATCH_PORT") echo "batch-upload" ;; 80) echo "letsencrypt" ;; *) echo "port" ;;
     esac
+}
+
+port_table() {   # the instance's ports with role and reach, for the confirm dialog and the summary
+    echo "  Ports"
+    [ "$COMP_STREAMING" = yes ] && printf '    %-6s %-13s %s\n' "$STREAM_PORT" streaming "public - devices stream here" \
+                                  "$ADMIN_PORT" "admin API" "127.0.0.1 only - remote CLI, config generator (SSH tunnel)"
+    [ "$COMP_CASTER" = yes ] && printf '    %-6s %-13s %s\n' "$CASTER_PORT" "NTRIP caster" "public - rovers pull corrections"
+    [ "$COMP_BATCH" = yes ] && printf '    %-6s %-13s %s\n' "$BATCH_PORT" "batch upload" "public - devices upload files ($( [ "$SSL_MODE" = none ] && echo http || echo https))"
+    [ "$COMP_FTP" = yes ] && printf '    %-6s %-13s %s\n' 21 "FTP/FTPS" "public - vsftpd, passive 50000-50100, shared by all instances"
+    return 0
 }
 
 # =========================================================== preflight =====
@@ -605,7 +627,8 @@ st_ftp() {
     local fw=none
     [ "${FW_ENABLED:-no}" = yes ] && fw=ufw
     in_dir test -f tools/setup-ftp.sh || { echo "tools/setup-ftp.sh missing in $DIR"; return 1; }
-    bash "$(ftp_script)" --dir "$DIR" --yes --firewall "$fw" ${PUBLIC_HOST:+--public-host "$PUBLIC_HOST"}
+    local user; user=$(env_get FTP_USER); user=${user:-${NAME}_ftp}   # an existing account stays
+    bash "$(ftp_script)" --dir "$DIR" --user "$user" --yes --firewall "$fw" ${PUBLIC_HOST:+--public-host "$PUBLIC_HOST"}
 }
 
 write_unit() {   # name description exec [extra]
@@ -876,12 +899,10 @@ write_summary() {
         echo "Directory: $DIR   Service user: $SVC_USER"
         echo "Services:  $(units | xargs)"
         echo
-        echo "Ports"
-        [ "$COMP_STREAMING" = yes ] && echo "  $STREAM_PORT/tcp  streaming - devices connect here"
-        [ "$COMP_STREAMING" = yes ] && echo "  $ADMIN_PORT/tcp  admin API - 127.0.0.1 only, never open it"
-        [ "$COMP_CASTER" = yes ] && echo "  $CASTER_PORT/tcp  NTRIP caster - rovers pull corrections here"
-        [ "$COMP_BATCH" = yes ] && echo "  $BATCH_PORT/tcp  batch uploads ($( [ "$SSL_MODE" = none ] && echo http || echo https))"
-        [ "$COMP_FTP" = yes ] && echo "  21/tcp + passive range  FTP / explicit FTPS (vsftpd, see below)"
+        echo "Names: everything of this instance carries its number ${NAME#wormhole_} -"
+        echo "  directory $DIR, services wormhole-${NAME#wormhole_}-*, registry $REGISTRY_DIR/$NAME.conf$( [ "$COMP_FTP" = yes ] && echo ", FTP account $(env_get FTP_USER)")"
+        echo
+        port_table
         if [ -n "$FW_PORTS" ]; then echo "  Opened in ufw: $FW_PORTS"
         else echo "  Not opened by this installer - open $(public_ports | xargs) in your firewall."; fi
         echo "  Behind a router/NAT: forward $(public_ports | xargs) to this machine."
@@ -980,8 +1001,11 @@ $PREFLIGHT_REPORT"
     [ "$COMP_STREAMING$COMP_BATCH" = nono ] && die "nothing selected"
 
     dialog_ports || exit 0
+    # The name is the port block the user typed (2026-10-17). Before, it was the port of
+    # the main service - a batch-only block 13000 became wormhole_13003; such an
+    # instance keeps its name.
     if [ "$COMP_STREAMING" = yes ]; then b=$STREAM_PORT; else b=$BATCH_PORT; fi
-    NAME="wormhole_$b"
+    if [ -f "$REGISTRY_DIR/wormhole_$b.conf" ]; then NAME="wormhole_$b"; else NAME="wormhole_$BASE_PORT"; fi
     if load_registry "$NAME"; then
         ask_yesno RESUME "$NAME is already installed in $DIR.
 
@@ -1047,8 +1071,8 @@ Activate it now? SSH (22) is allowed first so this session is not locked out. Ev
 
   Directory:   $DIR
   User:        $SVC_USER
-  Components:  $(units | sed "s/^wormhole-[0-9]*-//" | xargs)$( [ "$COMP_FTP" = yes ] && echo " ftp")
-  Ports:       $(selected_ports | tr '\n' ' ')
+  Services:    $(units | xargs)$( [ "$COMP_FTP" = yes ] && echo " + vsftpd (account ${NAME}_ftp)")
+$(port_table)
   Firewall:    $( [ "$FW_ENABLED" = yes ] && echo "open ${FW_OPEN:-nothing}" || echo "not managed (no ufw)")
   Public host: $PUBLIC_HOST
   Code:        $REPO_URL ($REPO_BRANCH)" install \

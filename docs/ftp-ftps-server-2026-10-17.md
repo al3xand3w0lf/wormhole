@@ -18,7 +18,7 @@ bash install.sh --unattended answers.env   # with COMPONENTS=... batch ftp
 | | |
 |---|---|
 | Server | **vsftpd** (Debian package), one per host, standalone on port 21 |
-| Account | one per instance, `<instance>_ftp` (e.g. `wormhole_8000_ftp`): system user, shell `/usr/sbin/nologin`, home `<dir>/data`, primary group = the group of the service user |
+| Account | one per instance, `<instance>_ftp` (e.g. `wormhole_8000_ftp`; the installer passes it, on its own the script takes `FTP_USER` from `.env`, else `<directory>_ftp`): system user, shell `/usr/sbin/nologin`, home `<dir>/data`, primary group = the group of the service user |
 | View | chroot to `<dir>/data`: **uploads to `incoming/`** (where `server.py` puts HTTP uploads), **downloads from `outgoing/`** (what `/modem/download` serves). `incoming_stream/` and `*.partial` are denied |
 | Who may log in | only accounts in `/etc/vsftpd/wormhole.userlist` (`userlist_deny=NO`); other local accounts with `--keep-user NAME` |
 | TLS | explicit FTPS (`AUTH TLS` on 21), **optional** (plain FTP still works); `--force-tls` refuses plain FTP, `--no-tls` switches TLS off. Certificate `/etc/ssl/private/wormhole-vsftpd.pem` (self-signed, 10 years) unless `--cert/--key` |
@@ -27,7 +27,8 @@ bash install.sh --unattended answers.env   # with COMPONENTS=... batch ftp
 | Firewall | `--firewall auto` (default): ufw if active (`21/tcp`, `MIN:MAX/tcp`, comment `wormhole ftp`), otherwise only a hint |
 | Files written | `/etc/vsftpd.conf` (old file backed up as `.bak_<date>`), `/etc/pam.d/vsftpd-wormhole`, `/etc/vsftpd/wormhole.userlist`, `/etc/vsftpd/user_conf/<account>`, `/etc/wormhole/ftp/<account>.conf` |
 
-It ends with the self test and prints the device settings:
+It ends with the self test, an overview (instance, account, ports 21 + passive
+range, TLS mode) and the device settings:
 
 ```ini
 upload_protocol = 0

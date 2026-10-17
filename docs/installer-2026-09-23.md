@@ -16,14 +16,44 @@ Run it as a normal user with sudo rights. **Do not pipe it into bash**
 to run without one. Afterwards `wormhole-setup` (a link in `/usr/local/bin`)
 opens the same menu.
 
+## Names and ports
+
+Everything of an instance carries **one number N, the port block you enter** in the
+ports dialog:
+
+| | Name |
+|---|---|
+| Instance (registry, menus) | `wormhole_N` — `/etc/wormhole/instances/wormhole_N.conf` |
+| Directory (default) | `~/wormhole_N` or `/opt/wormhole_N` |
+| systemd units | `wormhole-N-stream`, `wormhole-N-batch`, `wormhole-N-caster` |
+| FTP account (component ftp) | `wormhole_N_ftp` |
+
+| Port | Service | Reach | What for |
+|---|---|---|---|
+| N | streaming | public | devices hold their live TCP stream here |
+| N+1 | admin API | **127.0.0.1 only**, never opened | remote CLI (`stream_cli`), device config generator, station list — from another machine through an SSH tunnel (`ssh -L N+1:127.0.0.1:N+1 user@host`) |
+| N+2 | NTRIP caster | public | rovers pull corrections, bases are published as mountpoints |
+| N+3 | batch upload | public | devices upload finished files over HTTP(S) and download config/firmware |
+| 21 + 50000–50100 | FTP/FTPS (vsftpd) | public | FTP uploads/downloads into the same `data/` tree; **shared by all instances** on the host |
+
+The ports of components you do not select stay unused, but the block keeps its
+shape, so the next instance does not collide. Each port can be changed on the
+second ports screen; the name stays N. The confirm screen and
+`INSTALL_SUMMARY.txt` show this overview for the instance being installed.
+
+Until 2026-10-17 the name followed the main service's port, so a batch-only block
+13000 became `wormhole_13003`, and the FTP account followed the directory name. An
+instance installed that way keeps its name (the installer finds it in the
+registry); the FTP account is the one in its `.env`.
+
 ## What one install produces
 
 | | |
 |---|---|
-| Directory | `~/wormhole_<port>` (current user) or `/opt/wormhole_<port>` (system user `wormhole`) — git checkout of the chosen repo/branch |
+| Directory | `~/wormhole_N` (current user) or `/opt/wormhole_N` (system user `wormhole`) — git checkout of the chosen repo/branch |
 | Python | `venv/` with `requirements.txt` + `requirements-dev.txt` |
 | `.env` | from `.env.example`, `600`, owned by the service user; generated `API_KEY` and `STREAM_CLI_SECRET` (cut to `max_len - 1` of the device field from the config schema, fallback 31: the field size includes the terminator, and a longer secret is silently truncated by the device, which then rejects every CLI command with "auth failed") |
-| Units | `wormhole-<port>-stream`, `-batch`, `-caster`, the same names as the manual guide in `server-deployment.md`. They are **system** units with `Restart=always`, enabled at boot |
+| Units | `wormhole-N-stream`, `-batch`, `-caster`, the same names as the manual guide in `server-deployment.md`. They are **system** units with `Restart=always`, enabled at boot |
 | Caster | Millipede cloned and built inside the instance by the installer itself (not through `caster/setup.sh`), config from `caster/generate_config.py`. Runs as a system unit under the same user as the streaming server |
 | Firewall | ufw rules for the public ports you tick, comment `wormhole_<port> <role>`; the admin port never |
 | Registry | `/etc/wormhole/instances/<name>.conf` — ports, components, user, install answers |
@@ -41,8 +71,8 @@ opens the same menu.
    `data/`, FTPS optional, firewall through ufw when the installer manages it.
 3. **Ports**: a block is suggested from the first base port (9000, 10000, …) whose
    four ports are all free and not reserved by another registered instance;
-   stream = B, admin = B+1, caster = B+2, batch = B+3. Each port can be changed
-   one by one. Continuing validates them: 1024–65535, no duplicates, not
+   stream = B, admin = B+1, caster = B+2, batch = B+3; B also names the
+   instance (see "Names and ports"). Each port can be changed one by one. Continuing validates them: 1024–65535, no duplicates, not
    listening (`ss`), not claimed by another instance.
 4. **Service user**: the current user (default) or a dedicated system user
    `wormhole` (created with `useradd --system`, home `/var/lib/wormhole`).
@@ -84,7 +114,7 @@ bash install.sh --unattended answers.env
 
 ```ini
 COMPONENTS=streaming caster batch   # + ftp for FTP/FTPS (tools/setup-ftp.sh)
-BASE_PORT=12000            # or STREAM_PORT / ADMIN_PORT / CASTER_PORT / BATCH_PORT
+BASE_PORT=12000            # names the instance wormhole_12000; single ports: STREAM_PORT / ADMIN_PORT / CASTER_PORT / BATCH_PORT
 SERVICE_USER=current       # or system
 INSTALL_DIR=/opt/wormhole_12000
 PUBLIC_HOST=stations.example.org

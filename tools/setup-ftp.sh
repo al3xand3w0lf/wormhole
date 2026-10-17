@@ -13,7 +13,8 @@
 #
 # Options:
 #   --dir DIR            instance directory (default: the checkout this script is in)
-#   --user NAME          FTP login (default: <instance>_ftp, e.g. wormhole_9003_ftp)
+#   --user NAME          FTP login (default: FTP_USER in .env, else <directory>_ftp,
+#                        e.g. wormhole_9000_ftp; the installer passes <instance>_ftp)
 #   --password-stdin     read the password from stdin (default: generate one)
 #   --keep-user NAME     also allow this existing local account (home unchanged); repeatable
 #   --public-host HOST   address in passive replies (default: PUBLIC_HOST from .env, else none)
@@ -94,13 +95,15 @@ DIR=$(readlink -f "$DIR")
 NAME=$(basename "$DIR")
 SVC_USER=$(stat -c %U "$DIR/data")
 SVC_GROUP=$(stat -c %G "$DIR/data")
-FTP_USER=${FTP_USER_ARG:-${NAME}_ftp}
+env_get() { as_root sed -n "s/^$1=//p" "$DIR/.env" 2>/dev/null | tail -1 | sed 's/^"\(.*\)"$/\1/'; }
+# account: --user, else the one this instance already has (.env), else <directory>_ftp
+FTP_USER=${FTP_USER_ARG:-$(env_get FTP_USER)}
+FTP_USER=${FTP_USER:-${NAME}_ftp}
 [[ "$FTP_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid user name '$FTP_USER'"
 [[ "$PASV" =~ ^([0-9]+)-([0-9]+)$ ]] || die "--pasv needs MIN-MAX"
 PASV_MIN=${BASH_REMATCH[1]} PASV_MAX=${BASH_REMATCH[2]}
 [ "$PASV_MIN" -ge 1024 ] && [ "$PASV_MAX" -gt "$PASV_MIN" ] && [ "$PASV_MAX" -le 65535 ] || die "bad passive range $PASV"
 
-env_get() { as_root sed -n "s/^$1=//p" "$DIR/.env" 2>/dev/null | tail -1 | sed 's/^"\(.*\)"$/\1/'; }
 env_set() {   # KEY VALUE - in the instance .env, kept 600 and owned by the service user
     if $DRY; then echo "  + .env: $1=<${#2} chars>"; return 0; fi
     as_root touch "$DIR/.env"
@@ -363,6 +366,12 @@ sleep 1
 echo
 self_test
 rc=$?
+echo
+echo "Overview"
+echo "  instance      $DIR (service user $SVC_USER)"
+echo "  FTP account   $FTP_USER - chroot $DIR/data: uploads incoming/, downloads /outgoing"
+echo "  ports         21/tcp + passive $PASV_MIN-$PASV_MAX/tcp, public; shared by all instances on this host"
+echo "  TLS           $( [ "$TLS" = off ] && echo "off (plain FTP)" || echo "explicit FTPS on 21$( [ "$TLS" = forced ] && echo ", plain FTP refused" || echo ", plain FTP still allowed")")"
 echo
 echo "Device CONFIG.TXT (folder_ftp_dl needs firmware with that key; older firmware: see the documentation):"
 echo "  upload_protocol = 0"
