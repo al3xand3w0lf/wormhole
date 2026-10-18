@@ -934,7 +934,7 @@ write_summary() {
             echo "  upload_protocol = 0"
             echo "  server_ftp = $host"
             echo "  port_ftp = 21"
-            echo "  ftp_tls = 1            (0 = plain FTP)"
+            echo "  ftp_use_ssl = 1        (0 = plain FTP)"
             echo "  folder_ftp = incoming"
             echo "  folder_ftp_dl = /outgoing   (firmware with this key; older: see the FTP doc)"
             echo "  user_ftp = $(env_get FTP_USER)"

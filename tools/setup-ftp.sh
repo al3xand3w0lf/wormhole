@@ -377,7 +377,7 @@ echo "Device CONFIG.TXT (folder_ftp_dl needs firmware with that key; older firmw
 echo "  upload_protocol = 0"
 echo "  server_ftp = ${host:-<this server>}"
 echo "  port_ftp = 21"
-echo "  ftp_tls = $( [ "$TLS" = off ] && echo 0 || echo 1)"
+echo "  ftp_use_ssl = $( [ "$TLS" = off ] && echo 0 || echo 1)"
 echo "  folder_ftp = incoming"
 echo "  folder_ftp_dl = /outgoing"
 echo "  user_ftp = $FTP_USER"

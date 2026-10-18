@@ -34,7 +34,7 @@ range, TLS mode) and the device settings:
 upload_protocol = 0
 server_ftp = <PUBLIC_HOST>
 port_ftp = 21
-ftp_tls = 1
+ftp_use_ssl = 1
 folder_ftp = incoming
 folder_ftp_dl = /outgoing
 user_ftp = wormhole_8000_ftp
