@@ -181,3 +181,30 @@ async def test_commands_are_serialised_per_station():
     await asyncio.sleep(0)
     session.handle_cli_response(CliResponse("two\n", last=True))
     assert await second == "two\n"
+
+
+def test_superseded_connection_is_told_why_before_close():
+    """The OLD connection gets a SUPERSEDED frame naming the new peer,
+    then the close - a second device with the same id must be able to tell
+    this apart from a network fault. The new connection gets nothing."""
+    from streaming.frames import ID_SUPERSEDED, PRIVATE_CLASS, SUPERSEDED_ID_TAKEN
+
+    session, old_writer = make_session()
+    old_writer.sent.clear()
+    new_writer = FakeWriter()
+    session.bind(new_writer, "5.6.7.8:40000")
+
+    raw = bytes(old_writer.sent)
+    assert raw[:4] == bytes([0xB5, 0x62, PRIVATE_CLASS, ID_SUPERSEDED])
+    payload = ubx_payload(raw)
+    assert payload[0] == SUPERSEDED_ID_TAKEN
+    assert payload[1:] == b"5.6.7.8:40000"
+    assert old_writer.closed
+    assert not new_writer.sent and not new_writer.closed
+
+
+def test_rebinding_the_same_writer_sends_nothing():
+    session, writer = make_session()
+    writer.sent.clear()
+    session.bind(writer, "1.2.3.4:5000")
+    assert not writer.sent and not writer.closed

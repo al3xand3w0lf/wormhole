@@ -49,6 +49,10 @@ Wire format (little-endian, packed):
     0x17  FILE_UP_ACK          srv->dev   [result i8][crc32 u32]  verdict on an
                                             upload; the device deletes its SD
                                             copy only on result 1
+    0x18  SUPERSEDED           srv->dev   [reason u8][peer ASCII]  sent to the OLD
+                                            connection right before it is closed
+                                            because a newer one bound the same
+                                            station id; reason 1 = id taken
 
 ⚠️ `source` is provenance, not a measurement: 0 = a sample the producer took
 itself at its own rate, 1 = a per-minute value recovered from the sensor's own
@@ -170,6 +174,13 @@ UP_ACK_OK = 1
 UP_ACK_SIZE_MISMATCH = -1
 UP_ACK_CRC_MISMATCH = -2
 UP_ACK_ABORTED = -3
+# The station was handed to a newer connection with the same id (srv->dev, to
+# the OLD connection, just before the close): [reason u8][peer ASCII]. A device
+# that re-dialled never reads it - its old socket is gone - so a device that
+# does read it shares its station id with someone else.
+ID_SUPERSEDED = 0x18
+SUPERSEDED_ID_TAKEN = 1
+SUPERSEDED_PEER_MAX = 23   # the reference firmware keeps 23 chars + NUL
 
 # An RTCM3 frame is 3 B header + up to 1023 B payload + 3 B CRC-24Q. The device
 # sizes its inbound buffer from the same ceiling (1032 bytes in the reference
@@ -379,6 +390,12 @@ def encode_file_up_ack(result: int, crc32: int) -> bytes:
     return build_ubx(PRIVATE_CLASS, ID_FILE_UP_ACK,
                      struct.pack("<bI", result, crc32 & 0xFFFFFFFF))
 
+
+
+def encode_superseded(peer: str, reason: int = SUPERSEDED_ID_TAKEN) -> bytes:
+    """Build a SUPERSEDED frame: who took the station over, for the device's log."""
+    who = (peer or "").encode("ascii", errors="replace")[:SUPERSEDED_PEER_MAX]
+    return build_ubx(PRIVATE_CLASS, ID_SUPERSEDED, bytes([reason & 0xFF]) + who)
 
 def encode_gnss_tunnel(raw: bytes) -> bytes:
     """Wrap operator bytes for the device's receiver UART.

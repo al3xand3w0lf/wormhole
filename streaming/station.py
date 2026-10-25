@@ -15,7 +15,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from .frames import CliResponse, encode_cmd_request
+from .frames import CliResponse, encode_cmd_request, encode_superseded
 from .gpstime import GnssClock
 from .sinks import Sink
 
@@ -90,6 +90,17 @@ class StationSession:
         if old is not None and old is not writer:
             logger.info("station %s superseded by %s - closing stale %s",
                         self.station_id, peer, self.peer)
+            # Say why before hanging up. A device that re-dialled never reads this
+            # (its old socket is already gone); one that does shares its station id
+            # with someone else and can back off instead of kicking the other one
+            # straight back - a silent close looks like bad reception. Written
+            # without write_lock: bind() is synchronous, and whatever the old
+            # connection was transferring dies with it anyway. close() flushes the
+            # transport buffer first, so the frame goes out.
+            try:
+                old.write(encode_superseded(peer))
+            except Exception:  # noqa: BLE001 - the stale socket may already be dead
+                pass
             try:
                 old.close()
             except Exception:  # noqa: BLE001 - the stale socket may already be dead
