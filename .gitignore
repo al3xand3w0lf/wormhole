@@ -6,6 +6,8 @@
 !.env.example
 cert.pem
 key.pem
+# written by install.sh into the instance checkout: API key and CLI secret in clear
+INSTALL_SUMMARY.txt
 
 # Python
 venv/

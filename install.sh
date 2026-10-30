@@ -22,6 +22,9 @@
 # being typed in. Documentation: docs/installer-2026-09-23.md.
 
 set -uo pipefail
+# A normal user's PATH on Debian lacks the sbin directories, so "command -v ufw"
+# found nothing and the firewall step was skipped as "no ufw" (2026-10-30).
+PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
 
 # Where the code comes from when the installer was downloaded on its own. Run
 # from inside a git checkout, it installs that checkout's origin and branch
@@ -199,13 +202,13 @@ print_and_wait() {   # file [title]
 
 # The install-time answers are kept too, so an interrupted install resumes with
 # them instead of asking again.
-INSTANCE_VARS=(NAME BASE_PORT DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP STREAM_PORT
+INSTANCE_VARS=(NAME PROJECT BASE_PORT DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP STREAM_PORT
                ADMIN_PORT CASTER_PORT BATCH_PORT FW_PORTS SSL_MODE LE_DOMAIN LE_EMAIL
                REPO_URL REPO_BRANCH PUBLIC_HOST BASE_STATIONS RAW_MAX_AGE_H FW_ENABLED
                FW_ACTIVATE FW_OPEN INSTALL_DONE)
 
 reset_instance() {
-    NAME="" BASE_PORT="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes COMP_FTP=no
+    NAME="" PROJECT="" BASE_PORT="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes COMP_FTP=no
     STREAM_PORT="" ADMIN_PORT="" CASTER_PORT="" BATCH_PORT="" FW_PORTS="" SSL_MODE=none
     LE_DOMAIN="" LE_EMAIL="" REPO_URL="$DEFAULT_REPO_URL" REPO_BRANCH="$DEFAULT_BRANCH"
     PUBLIC_HOST="" BASE_STATIONS="" RAW_MAX_AGE_H=168 FW_ENABLED=no FW_ACTIVATE=no FW_OPEN=""
@@ -634,12 +637,17 @@ st_ftp() {
     bash "$(ftp_script)" --dir "$DIR" --user "$user" --yes --firewall "$fw" ${PUBLIC_HOST:+--public-host "$PUBLIC_HOST"}
 }
 
+# The project label is free text: one line, no backslash (line continuation in a
+# unit file), and % doubled, since systemd reads %x as a specifier.
+clean_project() { printf '%s' "$1" | tr '\000-\037' ' ' | tr -d '\\' | tr -s ' ' | sed 's/^ //; s/ $//'; }
+
 write_unit() {   # name description exec [extra]
-    local tmp; tmp=$(mktemp)
+    local tmp label=$NAME; tmp=$(mktemp)
+    [ -n "$PROJECT" ] && label="$NAME, ${PROJECT//%/%%}"
     cat >"$tmp" <<EOF
 # Written by wormhole install.sh for instance $NAME - rerun it to regenerate.
 [Unit]
-Description=$2 ($NAME)
+Description=$2 ($label)
 After=network-online.target
 Wants=network-online.target
 
@@ -658,8 +666,8 @@ EOF
     as_root install -m 644 "$tmp" "/etc/systemd/system/$1.service"; rm -f "$tmp"
 }
 
-st_units() {
-    local ssl_flag="" u
+write_units() {
+    local ssl_flag=""
     [ "$SSL_MODE" = none ] && ssl_flag=" --no-ssl"
     # The streaming unit deliberately does not depend on the caster: the sink
     # reconnects on its own, and a caster that is down must never hold up the
@@ -671,6 +679,12 @@ st_units() {
         "$DIR/venv/bin/python streaming_server.py"
     [ "$COMP_BATCH" = yes ] && write_unit "$(unit batch)" "Wormhole batch file server" \
         "$DIR/venv/bin/python server.py$ssl_flag"
+    return 0
+}
+
+st_units() {
+    local u
+    write_units
     as_root systemctl daemon-reload || return 1
     for u in $(units); do
         as_root systemctl enable "$u.service" && as_root systemctl restart "$u.service" || return 1
@@ -899,6 +913,7 @@ write_summary() {
     host=${PUBLIC_HOST:-<this server>}
     {
         echo "Wormhole instance $NAME"
+        [ -n "$PROJECT" ] && echo "Project:   $PROJECT"
         echo "Directory: $DIR   Service user: $SVC_USER"
         echo "Services:  $(units | xargs)"
         echo
@@ -1023,6 +1038,10 @@ Run the install steps again to repair it? Existing settings and .env are kept." 
     else SVC_USER=$(id -un); DIR="$HOME/$NAME"; fi
     [ "$SVC_USER" = root ] && ! $UNATTENDED && { ask_yesno X "The services would run as root. That works, but a normal user is safer. Continue?" no || exit 0; }
     DIR=$(ask_input INSTALL_DIR "Install directory:" "$DIR") || exit 0
+    PROJECT=$(ask_input PROJECT "Project this instance belongs to (optional, free text).
+
+The name $NAME only carries the port block. The project shows up in the service descriptions (systemctl status), in the instance list of wormhole-setup and in the summary, so it is still clear years later what the instance is for." "") || exit 0
+    PROJECT=$(clean_project "$PROJECT")
 
     PUBLIC_HOST=$(ask_input PUBLIC_HOST "Address devices use to reach this server (public IP or DNS name).
 
@@ -1072,6 +1091,7 @@ Activate it now? SSH (22) is allowed first so this session is not locked out. Ev
     while true; do
         choice=$(ask_menu CONFIRM "Ready to install $NAME
 
+  Project:     ${PROJECT:-(none)}
   Directory:   $DIR
   User:        $SVC_USER
   Services:    $(units | xargs)$( [ "$COMP_FTP" = yes ] && echo " + vsftpd (account ${NAME}_ftp)")
@@ -1191,7 +1211,7 @@ gen_device_config() {
 pick_instance() {
     local items=() n
     for n in $(list_instances); do
-        ( load_registry "$n" && echo "$n" "$DIR" )
+        ( load_registry "$n" && echo "$n" "$DIR${PROJECT:+  ($PROJECT)}" )
     done >/tmp/wormhole-instances.$$
     while read -r n d; do items+=("$n" "$d"); done </tmp/wormhole-instances.$$
     rm -f /tmp/wormhole-instances.$$
@@ -1204,7 +1224,9 @@ status_report() {
     f=$(mktemp)
     key=$(env_get API_KEY)
     {
-        echo "$NAME  ($DIR, user $SVC_USER)"; echo
+        echo "$NAME  ($DIR, user $SVC_USER)"
+        [ -n "$PROJECT" ] && echo "Project: $PROJECT"
+        echo
         for u in $(units); do
             printf '%-26s %-9s since %s, restarts %s\n' "$u" "$(systemctl is-active "$u")" \
                 "$(systemctl show "$u" -p ActiveEnterTimestamp --value)" "$(systemctl show "$u" -p NRestarts --value)"
@@ -1328,6 +1350,7 @@ settings_menu() {
     local choice v old_caster old ports_before
     while true; do
         choice=$(ask_menu X "Settings of $NAME - every change restarts what it affects and runs the server test." ports \
+            project  "Project: ${PROJECT:-(none)}" \
             ports    "Ports" \
             host     "Public address (PUBLIC_HOST): $(env_get PUBLIC_HOST)" \
             stations "Trusted base stations: $(env_get STREAM_ROVER_AUTO_BASE_STATIONS)" \
@@ -1354,6 +1377,13 @@ settings_menu() {
                 if [ -n "$FW_PORTS" ]; then FW_ENABLED=yes FW_ACTIVATE=no FW_OPEN=$(public_ports | xargs); st_firewall >>"$LOG_FILE" 2>&1; fi
                 apply_and_test "$(units)"
                 [ "$COMP_STREAMING" = yes ] && msg "Devices must now use streaming port $STREAM_PORT - update their CONFIG.TXT (Generate device CONFIG.TXT)." ;;
+            project)
+                v=$(ask_input X "Project this instance belongs to (free text, empty removes it):" "$PROJECT") || continue
+                PROJECT=$(clean_project "$v")
+                save_registry
+                # Only the unit descriptions change: daemon-reload, no restart.
+                write_units && as_root systemctl daemon-reload
+                msg "Project of $NAME: ${PROJECT:-(none)}" ;;
             host)
                 v=$(ask_input X "Address devices use to reach this server:" "$(env_get PUBLIC_HOST)") || continue
                 env_set PUBLIC_HOST "$v"; PUBLIC_HOST=$v
@@ -1430,7 +1460,8 @@ manage_menu() {
     load_registry "$1" || die "unknown instance $1"
     while true; do
         MENU_CANCEL="Back"
-        choice=$(ask_menu X "$NAME  -  $DIR" status \
+        choice=$(ask_menu X "$NAME  -  $DIR${PROJECT:+
+Project: $PROJECT}" status \
             status  "Status" \
             test    "Run the server test" \
             config  "Generate a device CONFIG.TXT" \
@@ -1532,6 +1563,10 @@ main() {
         status|test|update|restart|uninstall)
             [ -n "${2:-}" ] || die "$cmd needs an instance name ($(list_instances | xargs))"
             load_registry "$2" || die "unknown instance $2"
+            # Without dialogs the confirmation defaults to no, so a bare
+            # "uninstall NAME" used to exit 0 having done nothing (2026-10-30).
+            [ "$cmd" = uninstall ] && [[ " $* " != *" --yes "* ]] &&
+                die "uninstall needs --yes on the command line (or use the menu: wormhole-setup)"
             UNATTENDED=true
             sudo_start
             [[ " $* " == *" --yes "* ]] && { ANSWER[UNINSTALL]=yes; }

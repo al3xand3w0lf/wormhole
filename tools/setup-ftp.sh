@@ -32,6 +32,9 @@
 # docs/ftp-ftps-server-2026-10-17.md.
 
 set -uo pipefail
+# A normal user's PATH on Debian lacks the sbin directories, so "command -v ufw"
+# found nothing and the firewall step was skipped as "no ufw" (2026-10-30).
+PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
 
 VSFTPD_CONF=/etc/vsftpd.conf
 USERLIST=/etc/vsftpd/wormhole.userlist

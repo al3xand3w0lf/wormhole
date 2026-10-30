@@ -78,7 +78,16 @@ in the registry); the FTP account is the one in its `.env`.
    listening (`ss`), not claimed by another instance.
 4. **Service user**: the current user (default) or a dedicated system user
    `wormhole` (created with `useradd --system`, home `/var/lib/wormhole`).
-5. **Install directory**.
+5. **Install directory**, then the **project** (optional, free text). The
+   instance name only carries the port block, so the project is what says years
+   later what an instance is for: it goes into the registry (`PROJECT=`), the
+   units' `Description=` (`Wormhole streaming server (wormhole_9200, transfer)`,
+   shown by `systemctl status`), the instance list and menu title of
+   `wormhole-setup`, the status report and the summary. It is cleaned to one
+   line without backslashes, and `%` is doubled in the unit (systemd specifier).
+   It can be set or changed later under **Settings → Project**, which rewrites
+   the units and runs `daemon-reload` without restarting anything. Instances
+   installed before the field have none until it is set there.
 6. **Public address** (`PUBLIC_HOST`): the address devices dial, prefilled with
    the first LAN address. It is only a suggestion, because behind NAT the right
    answer is the router's public address or a DNS name.
@@ -95,7 +104,10 @@ in the registry); the FTP account is the one in its `.env`.
    renewed certificate where the service user can read it, since
    `/etc/letsencrypt/live/*/privkey.pem` is root-only).
 10. **Firewall** (only if ufw is installed): tick the public ports. If ufw is
-    inactive, it offers to activate it and allows SSH first.
+    inactive, it offers to activate it and allows SSH first. Both scripts append
+    the sbin directories to `PATH`: a normal user's `PATH` on Debian has no
+    `/usr/sbin`, and before that (2026-10-30) an install with ufw active
+    found "no ufw" and opened nothing.
 11. **Confirm**, with an advanced option to change the git source. The default
     source is the checkout the installer runs from (its `origin` and branch).
     A copy downloaded on its own uses the public template. An SSH URL together
@@ -119,6 +131,7 @@ COMPONENTS=streaming caster batch   # + ftp for FTP/FTPS (tools/setup-ftp.sh)
 BASE_PORT=12000            # names the instance wormhole_12000; single ports: STREAM_PORT / ADMIN_PORT / CASTER_PORT / BATCH_PORT
 SERVICE_USER=current       # or system
 INSTALL_DIR=/opt/wormhole_12000
+PROJECT=transfer           # optional label, see dialog 5
 PUBLIC_HOST=stations.example.org
 BASE_STATIONS=1001,1002
 RAW_MAX_AGE_H=168
@@ -182,7 +195,9 @@ CLI secret, raw retention, HTTPS, firewall) · install summary · uninstall.
   separate confirmation: you must type the instance name.
 
 CLI equivalents: `install.sh status|test|update|restart|uninstall <name>
-[--pytest] [--purge] [--yes]`.
+[--pytest] [--purge] [--yes]`. On the command line `uninstall` requires `--yes`
+and stops with an error without it; it used to answer its own confirmation
+with no and exit 0 having removed nothing.
 
 ## Resuming
 
