@@ -1,4 +1,4 @@
-"""TCP data plane (:9000) + HTTP admin/CLI control plane (:9001).
+"""TCP data plane (:9000) + HTTP admin/CLI control plane (:9010).
 
 Both run in one asyncio event loop, in a process separate from the batch HTTP
 server (server.py), which stays untouched.
@@ -24,6 +24,7 @@ from .frames import ROLE_BASE, ROLE_ROVER
 from .gnss_tunnel import registry as tunnel_registry
 from .framer import StreamFramer
 from .ntrip import NtripCasterSink
+from . import rawout, stationdir
 from .pipeline import decode_ident, is_ident, route_frame
 from .rover import RoverRouter, RoverSourceSink, ntrip_source
 from .rover_discovery import BaseArpSink, RoverAutoDiscovery, RoverPositionSink
@@ -123,6 +124,13 @@ def _make_sinks(station_id: int) -> list:
     # get_or_create()) - see the ordering note there.
     if _discovery is not None and _station_roles.get(station_id) == ROLE_ROVER:
         sinks.append(RoverPositionSink(station_id, _discovery))
+    # Every station, whatever its role: its receiver output, live, to whoever
+    # holds an account (rawout.py). Registering the sink is also what makes the
+    # station's mountpoint exist.
+    if _rawout_hub is not None:
+        sinks.append(rawout.RawOutSink(
+            _rawout_hub, station_id,
+            stationdir.label(station_id, _station_names.get(station_id, ""))))
     return sinks
 
 
@@ -168,6 +176,11 @@ _base_routers: dict[int, "RoverRouter"] = {}
 # Strong references to the auto-registered routers' run() tasks - see
 # _auto_register_base(). Without them those tasks are garbage-collectable.
 _router_tasks: dict[int, asyncio.Future] = {}
+
+# None unless STREAM_RAWOUT_ENABLE - see rawout.py. Created in run() before the
+# data plane listens, so _make_sinks() attaches a RawOutSink from the first
+# station on.
+_rawout_hub: rawout.RawOutHub | None = None
 
 
 def _ensure_base_router(station_id: int) -> None:
@@ -448,6 +461,19 @@ async def list_stations(_: str = Depends(verify_api_key)):
         {**s.status(), "role": _station_roles.get(s.station_id, 0)}
         for s in registry.all()
     ]}
+
+
+@admin.get("/stream/rawout", tags=["Stream"])
+async def rawout_status(_: str = Depends(verify_api_key)):
+    """Raw stream out: who reads which station, bytes, slow-client cuts, failed logins.
+
+    `dropped_slow` and `auth_failures` should be 0 - a non-zero value is a
+    finding (a consumer on a link too slow for the stream; someone guessing).
+    """
+    if _rawout_hub is None:
+        return {"enabled": False}
+    return {"enabled": True, "port": config.STREAM_RAWOUT_PORT,
+            "tls": config.STREAM_RAWOUT_TLS, **_rawout_hub.status()}
 
 
 @admin.get("/stream/rover", tags=["Stream"])
@@ -780,9 +806,28 @@ async def gnsstunnel_status(_: str = Depends(verify_api_key)):
 # Lifecycle
 # ==========================================================================
 async def run() -> None:
-    global _rover_router, _discovery, _manual_bases, _caster_provision
+    global _rover_router, _discovery, _manual_bases, _caster_provision, _rawout_hub
 
     setup_logging()
+
+    # --- Raw stream out (optional) - checked first, so a refusal costs nothing
+    rawout_server = None
+    if config.STREAM_RAWOUT_ENABLE:
+        accounts, account_errors = rawout.parse_users(config.STREAM_RAWOUT_USERS)
+        problem = rawout.config_error(
+            True, accounts, account_errors, config.STREAM_RAWOUT_TLS,
+            config.STREAM_RAWOUT_CERTFILE, config.STREAM_RAWOUT_KEYFILE)
+        if problem:
+            logger.error("raw stream out: %s", problem)
+            raise SystemExit(f"raw stream out: {problem}")
+        _rawout_hub = rawout.RawOutHub(
+            accounts, config.STREAM_RAWOUT_CLIENT_BUFFER_KB * 1024,
+            config.STREAM_RAWOUT_MAX_CLIENTS)
+        rawout_server = rawout.RawOutServer(
+            _rawout_hub, config.STREAM_RAWOUT_HOST, config.STREAM_RAWOUT_PORT,
+            rawout.make_ssl_context(config.STREAM_RAWOUT_CERTFILE, config.STREAM_RAWOUT_KEYFILE)
+            if config.STREAM_RAWOUT_TLS else None)
+
     config.STREAM_DIR.mkdir(parents=True, exist_ok=True)
     sweep_stale_raw()
 
@@ -883,6 +928,12 @@ async def run() -> None:
 
     tcp = await asyncio.start_server(handle_connection, config.STREAM_HOST, config.STREAM_PORT)
     logger.info("TCP data plane on %s:%d", config.STREAM_HOST, config.STREAM_PORT)
+    if rawout_server is not None:
+        await rawout_server.start()
+        logger.info("raw stream out (NTRIP) on %s:%d, %s, accounts %s",
+                    config.STREAM_RAWOUT_HOST, rawout_server.port,
+                    "TLS" if config.STREAM_RAWOUT_TLS else "plain NTRIP (no TLS)",
+                    sorted(_rawout_hub.accounts))
     if not config.STREAM_CLI_SECRET:
         logger.warning("STREAM_CLI_SECRET is empty - remote CLI is unauthenticated")
     else:
@@ -943,4 +994,6 @@ async def run() -> None:
         async with tcp:
             await asyncio.gather(tcp.serve_forever(), uv.serve(), *extra_tasks)
     finally:
+        if rawout_server is not None:
+            await rawout_server.close()
         registry.close_all()

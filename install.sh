@@ -3,8 +3,9 @@
 #
 # One run of "Install" sets up one complete instance: code, Python environment,
 # .env with generated secrets, the optional bundled NTRIP caster, the optional
-# FTP/FTPS server (vsftpd, tools/setup-ftp.sh), systemd units, firewall rules and
-# a server test. Every further instance on the same host is
+# FTP/FTPS server (vsftpd, tools/setup-ftp.sh), the optional raw stream out
+# (each station's receiver data live over NTRIP), systemd units, firewall rules
+# and a server test. Every further instance on the same host is
 # one more run with its own port block, directory and units.
 #
 #   bash install.sh                        menu (install / manage)
@@ -202,14 +203,15 @@ print_and_wait() {   # file [title]
 
 # The install-time answers are kept too, so an interrupted install resumes with
 # them instead of asking again.
-INSTANCE_VARS=(NAME PROJECT BASE_PORT DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP STREAM_PORT
-               ADMIN_PORT CASTER_PORT BATCH_PORT FW_PORTS SSL_MODE LE_DOMAIN LE_EMAIL
+INSTANCE_VARS=(NAME PROJECT BASE_PORT DIR SVC_USER COMP_STREAMING COMP_BATCH COMP_CASTER COMP_FTP COMP_RAWOUT
+               STREAM_PORT ADMIN_PORT CASTER_PORT BATCH_PORT RAWOUT_PORT FW_PORTS SSL_MODE LE_DOMAIN LE_EMAIL
                REPO_URL REPO_BRANCH PUBLIC_HOST BASE_STATIONS RAW_MAX_AGE_H FW_ENABLED
                FW_ACTIVATE FW_OPEN INSTALL_DONE)
 
 reset_instance() {
     NAME="" PROJECT="" BASE_PORT="" DIR="" SVC_USER="$(id -un)" COMP_STREAMING=yes COMP_BATCH=yes COMP_CASTER=yes COMP_FTP=no
-    STREAM_PORT="" ADMIN_PORT="" CASTER_PORT="" BATCH_PORT="" FW_PORTS="" SSL_MODE=none
+    COMP_RAWOUT=no   # an instance registered before 2026-11-04 has no such line: off
+    STREAM_PORT="" ADMIN_PORT="" CASTER_PORT="" BATCH_PORT="" RAWOUT_PORT="" FW_PORTS="" SSL_MODE=none
     LE_DOMAIN="" LE_EMAIL="" REPO_URL="$DEFAULT_REPO_URL" REPO_BRANCH="$DEFAULT_BRANCH"
     PUBLIC_HOST="" BASE_STATIONS="" RAW_MAX_AGE_H=168 FW_ENABLED=no FW_ACTIVATE=no FW_OPEN=""
     INSTALL_DONE=no
@@ -261,7 +263,7 @@ reserved_ports() {
         [ -f "$f" ] || continue
         [ "$(basename "$f" .conf)" = "$NAME" ] && continue
         # shellcheck disable=SC1090
-        ( source "$f"; echo "$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT" )
+        ( RAWOUT_PORT=""; source "$f"; echo "$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT $RAWOUT_PORT" )
     done
 }
 
@@ -276,7 +278,8 @@ port_free() {   # port [exempt...]  - exempt = ports this instance already owns
 suggest_base() {
     local b
     for b in "${BASE_CANDIDATES[@]}"; do
-        if port_free "$b" && port_free $((b+1)) && port_free $((b+2)) && port_free $((b+3)); then
+        if port_free "$b" && port_free $((b+1)) && port_free $((b+2)) && port_free $((b+3)) &&
+           port_free $((b+10)); then
             echo "$b"; return 0
         fi
     done
@@ -287,6 +290,7 @@ selected_ports() {   # "label port" lines for the chosen components
     [ "$COMP_STREAMING" = yes ] && echo "stream $STREAM_PORT" && echo "admin $ADMIN_PORT"
     [ "$COMP_CASTER" = yes ] && echo "caster $CASTER_PORT"
     [ "$COMP_BATCH" = yes ] && echo "batch $BATCH_PORT"
+    [ "$COMP_RAWOUT" = yes ] && echo "rawout $RAWOUT_PORT"
     return 0
 }
 
@@ -315,27 +319,31 @@ dialog_ports() {   # [exempt ports...]  - sets *_PORT; returns 1 on cancel
         b=$(suggest_base)
         b=$(ask_input BASE_PORT "Port block for this instance.
 
-Enter the first port of a block of four. The number also names the instance:
+Enter the first port of the block. The number also names the instance:
 port block N -> instance wormhole_N, directory wormhole_N, services
 wormhole-N-stream / -batch / -caster, FTP account wormhole_N_ftp.
 
-  N    streaming     devices connect here (public)
-  N+1  batch upload  devices upload finished files over HTTP(S) (public)
-  N+2  NTRIP caster  rovers pull corrections here (public)
-  N+3  admin API     remote CLI and config generator; 127.0.0.1 only,
-                     reached through an SSH tunnel, never opened
+  N     streaming       devices connect here (public)
+  N+1   batch upload    devices upload finished files over HTTP(S) (public)
+  N+2   NTRIP caster    rovers pull corrections here (public)
+  N+3   raw stream out  receiver data live over NTRIP, for processing
+                        elsewhere (public)
+  N+10  admin API       remote CLI and config generator; 127.0.0.1 only,
+                        reached through an SSH tunnel, never opened
 
-The public ports are one range, N..N+2 - one firewall rule, one port
+The public ports are one range, N..N+3 - one firewall rule, one port
 forward. Ports of components you do not select stay unused. FTP/FTPS always uses
 port 21 (shared by all instances on this host).
 You can change each port individually on the next screen; the name stays N." "$b") || return 1
         [[ "$b" =~ ^[0-9]+$ ]] || b=$(suggest_base)
         STREAM_PORT=${ANSWER[STREAM_PORT]:-$b}
-        # block layout since 2026-10-17: public ports first (N, N+1, N+2), admin last;
-        # instances installed before keep admin N+1 / batch N+3 (registry)
+        # block layout since 2026-11-04: public ports N..N+3, admin at a fixed N+10,
+        # so a new public service never moves it. 2026-10-17..11-03 admin was N+3,
+        # before that N+1 with batch N+3; those instances keep theirs (registry).
         BATCH_PORT=${ANSWER[BATCH_PORT]:-$((b+1))}
         CASTER_PORT=${ANSWER[CASTER_PORT]:-$((b+2))}
-        ADMIN_PORT=${ANSWER[ADMIN_PORT]:-$((b+3))}
+        RAWOUT_PORT=${ANSWER[RAWOUT_PORT]:-$((b+3))}
+        ADMIN_PORT=${ANSWER[ADMIN_PORT]:-$((b+10))}
         BASE_PORT=$b
         # answers file with single ports but no BASE_PORT: the main service names it
         if [ -z "${ANSWER[BASE_PORT]:-}" ] && [ -n "${ANSWER[STREAM_PORT]:-}${ANSWER[BATCH_PORT]:-}" ]; then
@@ -351,6 +359,7 @@ You can change each port individually on the next screen; the name stays N." "$b
         [ "$COMP_STREAMING" = yes ] && items+=(stream "Streaming (devices)      $STREAM_PORT  public")
         [ "$COMP_BATCH" = yes ] && items+=(batch "Batch uploads (HTTP)     $BATCH_PORT  public")
         [ "$COMP_CASTER" = yes ] && items+=(caster "NTRIP caster (rovers)    $CASTER_PORT  public")
+        [ "$COMP_RAWOUT" = yes ] && items+=(rawout "Raw stream out (NTRIP)   $RAWOUT_PORT  public")
         [ "$COMP_STREAMING" = yes ] && items+=(admin "Admin API / remote CLI   $ADMIN_PORT  local only")
         items+=(ok "Continue with these ports")
         choice=$(ask_menu PORT_MENU "Ports of ${NAME:-wormhole_$BASE_PORT}. Select one to change it.
@@ -360,6 +369,7 @@ public = devices or rovers reach it from outside; local only = this machine$( [ 
             admin)  v=$(ask_input X "Admin API port (bound to 127.0.0.1, never opened in the firewall):" "$ADMIN_PORT") && ADMIN_PORT=$v ;;
             caster) v=$(ask_input X "NTRIP caster port:" "$CASTER_PORT") && CASTER_PORT=$v ;;
             batch)  v=$(ask_input X "Batch upload port:" "$BATCH_PORT") && BATCH_PORT=$v ;;
+            rawout) v=$(ask_input X "Raw stream out port (NTRIP, public):" "$RAWOUT_PORT") && RAWOUT_PORT=$v ;;
             ok)
                 if problem=$(validate_ports "$@"); then return 0; fi
                 msg "Cannot use these ports:
@@ -373,13 +383,15 @@ public_ports() {   # ports that devices / rovers reach from outside
     [ "$COMP_STREAMING" = yes ] && echo "$STREAM_PORT"
     [ "$COMP_CASTER" = yes ] && echo "$CASTER_PORT"
     [ "$COMP_BATCH" = yes ] && echo "$BATCH_PORT"
+    [ "$COMP_RAWOUT" = yes ] && echo "$RAWOUT_PORT"
     return 0
 }
 
 port_role() {
     case "$1" in
         "$STREAM_PORT") echo "streaming" ;; "$CASTER_PORT") echo "ntrip-caster" ;;
-        "$BATCH_PORT") echo "batch-upload" ;; 80) echo "letsencrypt" ;; *) echo "port" ;;
+        "$BATCH_PORT") echo "batch-upload" ;; "$RAWOUT_PORT") echo "raw-stream-out" ;;
+        80) echo "letsencrypt" ;; *) echo "port" ;;
     esac
 }
 
@@ -388,6 +400,7 @@ port_table() {   # the instance's ports with role and reach, for the confirm dia
     [ "$COMP_STREAMING" = yes ] && printf '    %-6s %-13s %s\n' "$STREAM_PORT" streaming "public - devices stream here"
     [ "$COMP_BATCH" = yes ] && printf '    %-6s %-13s %s\n' "$BATCH_PORT" "batch upload" "public - devices upload files ($( [ "$SSL_MODE" = none ] && echo http || echo https))"
     [ "$COMP_CASTER" = yes ] && printf '    %-6s %-13s %s\n' "$CASTER_PORT" "NTRIP caster" "public - rovers pull corrections"
+    [ "$COMP_RAWOUT" = yes ] && printf '    %-6s %-13s %s\n' "$RAWOUT_PORT" "raw out" "public - receiver data live over NTRIP (mountpoint = station id)"
     [ "$COMP_STREAMING" = yes ] && printf '    %-6s %-13s %s\n' "$ADMIN_PORT" "admin API" "127.0.0.1 only - remote CLI, config generator (SSH tunnel)"
     [ "$COMP_FTP" = yes ] && printf '    %-6s %-13s %s\n' 21 "FTP/FTPS" "public - vsftpd, passive 50000-50100, shared by all instances"
     return 0
@@ -539,9 +552,35 @@ st_venv() {
     in_dir venv/bin/pip install --upgrade pip && in_dir venv/bin/pip install "${req[@]}"
 }
 
+# The raw stream out in .env. Only its own keys: an account that exists is
+# kept, so a repair run or switching it on again never invalidates what a
+# consumer was given. The password travels in clear text (plain NTRIP), so it
+# is generated here and guards nothing else.
+rawout_env() {
+    env_set STREAM_RAWOUT_ENABLE true &&
+    env_set STREAM_RAWOUT_HOST 0.0.0.0 &&
+    env_set STREAM_RAWOUT_PORT "$RAWOUT_PORT" &&
+    env_set STREAM_RAWOUT_TLS false || return 1
+    [ -n "$(env_get STREAM_RAWOUT_USERS)" ] ||
+        env_set STREAM_RAWOUT_USERS "processing:$(gen_secret 16):*"
+}
+
+# First account of STREAM_RAWOUT_USERS as "user password stations".
+rawout_account() {
+    local e rest
+    e=$(env_get STREAM_RAWOUT_USERS); e=${e%%,*}
+    [ -n "$e" ] || return 1
+    rest=${e#*:}
+    echo "${e%%:*} ${rest%:*} ${rest##*:}"
+}
+
 st_env() {
     local max
-    if in_dir test -f .env; then echo ".env exists - kept unchanged"; return 0; fi
+    if in_dir test -f .env; then
+        echo ".env exists - kept unchanged"
+        if [ "$COMP_RAWOUT" = yes ]; then rawout_env || return 1; echo "raw stream out keys set"; fi
+        return 0
+    fi
     in_dir cp .env.example .env && in_dir chmod 600 .env || return 1
     max=$(cli_secret_max)
     env_set API_KEY "$(gen_secret 32)" &&
@@ -566,6 +605,7 @@ st_env() {
         env_set STREAM_CASTER_AUTO_ENABLE true &&
         env_set STREAM_CASTER_ETC_DIR "$DIR/caster/millipede-caster/etc" || return 1
     fi
+    if [ "$COMP_RAWOUT" = yes ]; then rawout_env || return 1; fi
     echo ".env written"
 }
 
@@ -777,6 +817,33 @@ batch_url() {
     if [ "$SSL_MODE" = none ]; then echo "http://127.0.0.1:$BATCH_PORT"; else echo "https://127.0.0.1:$BATCH_PORT"; fi
 }
 
+# The raw stream out, checked while the self-test station streams: a wrong
+# password is refused, the account gets a sourcetable, and the test station's
+# receiver data arrives through tools/rawout_client.py (the reference client).
+rawout_test() {
+    local user pw stations code n
+    read -r user pw stations < <(rawout_account; echo)
+    if [ -z "$user" ]; then tr_fail "raw stream out: no account in STREAM_RAWOUT_USERS"; return; fi
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Ntrip-Version: Ntrip/2.0" \
+        -u "$user:wrong-$$" "http://127.0.0.1:$RAWOUT_PORT/")
+    if [ "$code" = 401 ]; then tr_ok "raw stream out refuses a wrong password"
+    else tr_fail "raw stream out answered '$code' to a wrong password (expected 401)"; fi
+    if curl -s --max-time 5 -H "Ntrip-Version: Ntrip/2.0" -u "$user:$pw" \
+           "http://127.0.0.1:$RAWOUT_PORT/" | grep -q ENDSOURCETABLE; then
+        tr_ok "raw stream out: account $user gets the sourcetable"
+    else
+        tr_fail "raw stream out on port $RAWOUT_PORT gives account $user no sourcetable"
+    fi
+    if [ "$stations" != "*" ] && [[ "+$stations+" != *"+$SELFTEST_STATION+"* ]]; then
+        tr_info "raw stream out data test skipped: account $user may not read station $SELFTEST_STATION"
+        return
+    fi
+    n=$(in_dir env RAWOUT_TEST_PW="$pw" timeout 6 venv/bin/python tools/rawout_client.py \
+        "127.0.0.1:$RAWOUT_PORT/$SELFTEST_STATION" --user "$user" --password @RAWOUT_TEST_PW 2>>"$LOG_FILE" | wc -c)
+    if [ "${n:-0}" -gt 0 ]; then tr_ok "raw stream out delivered $n bytes of test station $SELFTEST_STATION"
+    else tr_fail "raw stream out delivered nothing for test station $SELFTEST_STATION"; fi
+}
+
 station_json() {   # station id -> "connected bytes_rx garbage resync" or empty
     curl -fsS --max-time 5 -H "X-API-Key: $API_KEY" "http://127.0.0.1:$ADMIN_PORT/stream/stations" 2>/dev/null |
         python3 -c 'import json, sys
@@ -825,7 +892,7 @@ server_test() {   # [with_pytest yes|no] [install yes|no]
         else
             in_dir env FAKE_DEVICE_ENABLE=1 venv/bin/python fake_device.py --host 127.0.0.1 \
                 --port "$STREAM_PORT" --station "$SELFTEST_STATION" --role stream \
-                --secret "$secret" --duration 20 >>"$LOG_FILE" 2>&1 &
+                --secret "$secret" --duration "$( [ "$COMP_RAWOUT" = yes ] && echo 30 || echo 20)" >>"$LOG_FILE" 2>&1 &
             fpid=$!
             connected="" bytes=0 garbage=0 resync=0
             for _ in $(seq 1 15); do
@@ -837,6 +904,7 @@ server_test() {   # [with_pytest yes|no] [install yes|no]
                 tr_ok "test station $SELFTEST_STATION streamed $bytes bytes"
                 if [ "$garbage" = 0 ] && [ "$resync" = 0 ]; then tr_ok "stream intact (garbage 0, resyncs 0)"
                 else tr_fail "stream damaged: garbage_bytes=$garbage resync_events=$resync"; fi
+                [ "$COMP_RAWOUT" = yes ] && rawout_test
             else
                 tr_fail "test station $SELFTEST_STATION did not stream (see log)"
             fi
@@ -891,7 +959,7 @@ server_test() {   # [with_pytest yes|no] [install yes|no]
         as_root systemctl restart "$(unit stream)" && wait_listening 30 >/dev/null
     fi
 
-    tr_info "reachability from outside cannot be tested from here - from another machine: nc -vz ${PUBLIC_HOST:-<host>} ${STREAM_PORT:-$BATCH_PORT}"
+    tr_info "reachability from outside cannot be tested from here - from another machine: nc -vz ${PUBLIC_HOST:-<host>} ${STREAM_PORT:-$BATCH_PORT}$( [ "$COMP_RAWOUT" = yes ] && echo " (raw out: $RAWOUT_PORT)")"
     [ "$TEST_FAILS" -eq 0 ]
 }
 
@@ -942,6 +1010,19 @@ write_summary() {
             echo "  ssh -L $ADMIN_PORT:127.0.0.1:$ADMIN_PORT <user>@$host"
             echo "  then http://127.0.0.1:$ADMIN_PORT/config/  (device config generator)"
             echo "  Remote CLI on this server: cd $DIR && venv/bin/python stream_cli/stream_cli.py --list"
+            echo
+        fi
+        if [ "$COMP_RAWOUT" = yes ]; then
+            local ru rp rs
+            read -r ru rp rs < <(rawout_account; echo)
+            echo "Raw stream out - each station's receiver data (UBX + RTCM3) live over NTRIP"
+            echo "  host $host, port $RAWOUT_PORT, plain NTRIP (no TLS), mountpoint = station id"
+            echo "  account:  $ru / $rp   (stations: $rs)"
+            echo "  list the stations:  str2str -in ntrip://$ru:$rp@$host:$RAWOUT_PORT/"
+            echo "  one station:        str2str -in ntrip://$ru:$rp@$host:$RAWOUT_PORT/<station> -out file://<station>_%Y%m%d%h.ubx::S=1"
+            echo "  or: python3 tools/rawout_client.py $host:$RAWOUT_PORT/<station> --user $ru --password @ENVVAR"
+            echo "  The password travels in clear text - use it for nothing else."
+            echo "  Not pygnssutils' GNSSNTRIPClient: it drops every UBX frame."
             echo
         fi
         if [ "$COMP_FTP" = yes ]; then
@@ -1002,12 +1083,18 @@ $PREFLIGHT_REPORT"
         streaming "Streaming server (live TCP stream from devices)" ON \
         caster    "NTRIP caster (bases publish, rovers pull)" ON \
         batch     "Batch file server (devices upload finished files)" ON \
-        ftp       "FTP/FTPS server for batch devices (vsftpd, port 21)" OFF) || exit 0
-    COMP_STREAMING=no COMP_CASTER=no COMP_BATCH=no COMP_FTP=no
+        ftp       "FTP/FTPS server for batch devices (vsftpd, port 21)" OFF \
+        rawout    "Raw stream out (receiver data live over NTRIP, for processing)" OFF) || exit 0
+    COMP_STREAMING=no COMP_CASTER=no COMP_BATCH=no COMP_FTP=no COMP_RAWOUT=no
     [[ " $comps " == *" streaming "* ]] && COMP_STREAMING=yes
     [[ " $comps " == *" caster "* ]] && COMP_CASTER=yes
     [[ " $comps " == *" batch "* ]] && COMP_BATCH=yes
     [[ " $comps " == *" ftp "* ]] && COMP_FTP=yes
+    [[ " $comps " == *" rawout "* ]] && COMP_RAWOUT=yes
+    if [ "$COMP_RAWOUT" = yes ] && [ "$COMP_STREAMING" = no ]; then
+        msg "The raw stream out forwards what the streaming server receives - streaming is switched on as well."
+        COMP_STREAMING=yes
+    fi
     if [ "$COMP_CASTER" = yes ] && [ "$COMP_STREAMING" = no ]; then
         msg "The NTRIP caster is fed by the streaming server - streaming is switched on as well."
         COMP_STREAMING=yes
@@ -1245,6 +1332,20 @@ for s in rows:
           s.get("garbage_bytes"), s.get("resync_events")))' || echo "  (admin API not reachable)"
             echo
         fi
+        if [ "$COMP_RAWOUT" = yes ]; then
+            echo "Raw stream out (port $RAWOUT_PORT):"
+            curl -fsS --max-time 5 -H "X-API-Key: $key" "http://127.0.0.1:$ADMIN_PORT/stream/rawout" 2>/dev/null |
+                python3 -c 'import json, sys
+d = json.load(sys.stdin)
+if not d.get("enabled"): print("  not running")
+else:
+    print("  failed logins:", d.get("auth_failures"))
+    for c in d.get("clients", []): print("  %-12s station %-6s %s  %s bytes" % (c["user"], c["station"], c["peer"], c["bytes_out"]))
+    if not d.get("clients"): print("  no consumer connected")
+    cut = {k: v["dropped_slow"] for k, v in d.get("stations", {}).items() if v.get("dropped_slow")}
+    if cut: print("  cut off as too slow:", cut)' || echo "  (admin API not reachable)"
+            echo
+        fi
         if [ "$COMP_CASTER" = yes ]; then
             echo "Caster mountpoints:"
             curl -fsS --max-time 5 -H "X-API-Key: $key" "http://127.0.0.1:$ADMIN_PORT/stream/caster" 2>/dev/null |
@@ -1352,6 +1453,7 @@ settings_menu() {
         choice=$(ask_menu X "Settings of $NAME - every change restarts what it affects and runs the server test." ports \
             project  "Project: ${PROJECT:-(none)}" \
             ports    "Ports" \
+            rawout   "Raw stream out (NTRIP): $( [ "$COMP_RAWOUT" = yes ] && echo "on, port $RAWOUT_PORT" || echo off)" \
             host     "Public address (PUBLIC_HOST): $(env_get PUBLIC_HOST)" \
             stations "Trusted base stations: $(env_get STREAM_ROVER_AUTO_BASE_STATIONS)" \
             secret   "Generate a new CLI secret" \
@@ -1362,13 +1464,14 @@ settings_menu() {
         sudo_start
         case "$choice" in
             ports)
-                ports_before="$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT"
+                ports_before="$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT $RAWOUT_PORT"
                 old_caster=$CASTER_PORT
                 # shellcheck disable=SC2086
                 dialog_ports $ports_before || continue
-                [ "$ports_before" = "$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT" ] && continue
+                [ "$ports_before" = "$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT $RAWOUT_PORT" ] && continue
                 restart_warning || { load_registry "$NAME"; continue; }
                 [ "$COMP_STREAMING" = yes ] && { env_set STREAM_PORT "$STREAM_PORT"; env_set STREAM_ADMIN_PORT "$ADMIN_PORT"; }
+                [ "$COMP_RAWOUT" = yes ] && env_set STREAM_RAWOUT_PORT "$RAWOUT_PORT"
                 [ "$COMP_BATCH" = yes ] && env_set PORT "$BATCH_PORT"
                 if [ "$COMP_CASTER" = yes ] && [ "$old_caster" != "$CASTER_PORT" ]; then
                     env_set STREAM_CASTER_PORT "$CASTER_PORT"; st_caster >>"$LOG_FILE" 2>&1
@@ -1377,6 +1480,7 @@ settings_menu() {
                 if [ -n "$FW_PORTS" ]; then FW_ENABLED=yes FW_ACTIVATE=no FW_OPEN=$(public_ports | xargs); st_firewall >>"$LOG_FILE" 2>&1; fi
                 apply_and_test "$(units)"
                 [ "$COMP_STREAMING" = yes ] && msg "Devices must now use streaming port $STREAM_PORT - update their CONFIG.TXT (Generate device CONFIG.TXT)." ;;
+            rawout) rawout_settings ;;
             project)
                 v=$(ask_input X "Project this instance belongs to (free text, empty removes it):" "$PROJECT") || continue
                 PROJECT=$(clean_project "$v")
@@ -1447,6 +1551,94 @@ Set it as streaming_cli_secret on every device." ;;
     done
 }
 
+rawout_account_msg() {
+    local ru rp rs host
+    read -r ru rp rs < <(rawout_account; echo)
+    host=$(env_get PUBLIC_HOST)
+    msg "Raw stream out of $NAME - plain NTRIP, mountpoint = station id
+
+  host:      ${host:-<this server>}
+  port:      $RAWOUT_PORT
+  account:   $ru
+  password:  $rp
+  stations:  $rs
+
+  str2str -in ntrip://$ru:$rp@${host:-<host>}:$RAWOUT_PORT/<station> -out file://<station>_%Y%m%d%h.ubx::S=1
+
+The password travels in clear text - use it for nothing else.
+It is also in the install summary (Show the install summary)."
+}
+
+# Switch the raw stream out on or off, show or renew its account. Switching it
+# on for an instance whose admin API sits on N+3 (the layout of 2026-10-17 ..
+# 2026-11-03) offers to move admin to N+10 first, so the raw stream out gets
+# N+3 and the public ports stay one range.
+rawout_settings() {
+    local choice v base old_admin old_ports problem ru rp rs
+    [ "$COMP_STREAMING" = yes ] || { msg "The raw stream out needs the streaming server, which this instance does not run."; return; }
+    in_dir test -f streaming/rawout.py || { msg "The code of $NAME has no raw stream out yet - run Update first."; return; }
+    if [ "$COMP_RAWOUT" = yes ]; then
+        choice=$(ask_menu X "Raw stream out of $NAME: on, port $RAWOUT_PORT" show \
+            show  "Show the account (host, port, user, password)" \
+            newpw "Generate a new password (consumers must get the new one)" \
+            off   "Switch the raw stream out off" \
+            back  "Back") || return
+        case "$choice" in
+            show) rawout_account_msg ;;
+            newpw)
+                ask_yesno X "A new password disconnects nobody now, but every consumer that reconnects needs the new one. Continue?" no || return
+                read -r ru rp rs < <(rawout_account; echo)
+                env_set STREAM_RAWOUT_USERS "${ru:-processing}:$(gen_secret 16):${rs:-*}"
+                restart_warning || return
+                apply_and_test "$(unit stream)"
+                rawout_account_msg ;;
+            off)
+                restart_warning || return
+                env_set STREAM_RAWOUT_ENABLE false
+                COMP_RAWOUT=no
+                save_registry
+                if [ -n "$FW_PORTS" ]; then FW_ENABLED=yes FW_ACTIVATE=no FW_OPEN=$(public_ports | xargs); st_firewall >>"$LOG_FILE" 2>&1; fi
+                apply_and_test "$(unit stream)" ;;
+        esac
+        return
+    fi
+
+    base=${BASE_PORT:-$STREAM_PORT}
+    old_admin=$ADMIN_PORT
+    old_ports="$STREAM_PORT $ADMIN_PORT $CASTER_PORT $BATCH_PORT $RAWOUT_PORT"
+    [ -n "$RAWOUT_PORT" ] || RAWOUT_PORT=$((base + 3))
+    if [ "$RAWOUT_PORT" = "$ADMIN_PORT" ]; then
+        if ask_yesno X "Port $RAWOUT_PORT (N+3) is the admin API of $NAME - the port layout before 2026-11-04.
+
+Move the admin API to N+10 ($((base + 10))) and give the raw stream out N+3 ($RAWOUT_PORT)? Then the public ports stay one range.
+
+Afterwards SSH tunnels to the admin API use port $((base + 10)). Devices are not affected." yes; then
+            ADMIN_PORT=$((base + 10))
+        else
+            v=$(ask_input X "Port for the raw stream out (public):" "$((base + 4))") || { load_registry "$NAME"; return; }
+            RAWOUT_PORT=$v
+        fi
+    fi
+    COMP_RAWOUT=yes
+    # shellcheck disable=SC2086
+    if ! problem=$(validate_ports $old_ports); then
+        msg "Cannot switch the raw stream out on:
+
+$problem"
+        load_registry "$NAME"; return
+    fi
+    ask_yesno X "Switch on the raw stream out of $NAME?
+
+Every station's receiver data (UBX + RTCM3) becomes readable live over NTRIP on port $RAWOUT_PORT, for one account with a generated password$( [ "$ADMIN_PORT" != "$old_admin" ] && printf '.\nThe admin API moves from %s to %s' "$old_admin" "$ADMIN_PORT").$( [ -n "$FW_PORTS" ] && printf '\nPort %s is opened in ufw.' "$RAWOUT_PORT")" yes || { load_registry "$NAME"; return; }
+    restart_warning || { load_registry "$NAME"; return; }
+    rawout_env || { msg "Writing .env failed - see $LOG_FILE"; load_registry "$NAME"; return; }
+    env_set STREAM_ADMIN_PORT "$ADMIN_PORT"
+    save_registry
+    if [ -n "$FW_PORTS" ]; then FW_ENABLED=yes FW_ACTIVATE=no FW_OPEN=$(public_ports | xargs); st_firewall >>"$LOG_FILE" 2>&1; fi
+    apply_and_test "$(unit stream)"
+    rawout_account_msg
+}
+
 apply_and_test() {   # units to restart
     local u
     for u in $1; do as_root systemctl restart "$u.service"; done
@@ -1468,7 +1660,7 @@ Project: $PROJECT}" status \
             update  "Update (git pull, test, restart what changed)" \
             restart "Restart services" \
             logs    "Logs" \
-            settings "Settings (ports, address, stations, secret, HTTPS, firewall)" \
+            settings "Settings (ports, raw stream out, address, stations, secret, HTTPS, firewall)" \
             summary "Show the install summary (ports, keys, device settings)" \
             uninstall "Uninstall" \
             back    "Back to the main menu" \

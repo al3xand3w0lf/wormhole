@@ -31,7 +31,7 @@ several stations share one caster.
   `0.0.0.0:STREAM_CASTER_PORT` so *rovers* can reach it from elsewhere.
   Loopback push + externally-reachable listen are independent — the caster
   binding to all interfaces does not make the streaming server's own ports
-  (`:9000`/`:9001`) any more exposed than they already are.
+  (data and admin port) any more exposed than they already are.
 
 ## Setup
 

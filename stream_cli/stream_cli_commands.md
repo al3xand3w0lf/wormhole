@@ -1,7 +1,7 @@
 # stream_cli.py — command reference
 
 An interactive terminal for the streaming server's remote CLI. It talks to the
-server's admin API (`:9001`); the server sends the command to the device as frames
+server's admin API (`:9010`); the server sends the command to the device as frames
 and reassembles the reply. The script itself contains **no** frame logic and never
 talks to a device directly.
 
@@ -47,7 +47,7 @@ It asks for the station first (only **connected** ones can be picked), then for 
 command:
 
 ```
-  Stations on http://127.0.0.1:9001
+  Stations on http://127.0.0.1:9010
 
     1) 1001   gps 2026-08-31T18:10:00   203.0.113.5:8910
     2) 2201   gps 2026-08-31T18:10:00   203.0.113.47:61529
@@ -176,7 +176,7 @@ python stream_cli/stream_cli.py
 You then get a prompt:
 
 ```
-Connected to http://127.0.0.1:9001, station 1001. Type /help, /quit to exit.
+Connected to http://127.0.0.1:9010, station 1001. Type /help, /quit to exit.
 1001>
 ```
 
@@ -321,12 +321,12 @@ The same order applies to the API key and the admin URL:
 
 ## From another machine (SSH tunnel)
 
-The admin port `9001` is never exposed publicly — it binds `STREAM_ADMIN_HOST`
+The admin port `9010` is never exposed publicly — it binds `STREAM_ADMIN_HOST`
 (default `127.0.0.1`). Reach it from elsewhere through a tunnel:
 
 ```bash
-ssh -L 9001:127.0.0.1:9001 <user>@<host>     # leave this open in one terminal
-python stream_cli/stream_cli.py --url http://127.0.0.1:9001 --api-key <KEY> --station 1001
+ssh -L 9010:127.0.0.1:9010 <user>@<host>     # leave this open in one terminal
+python stream_cli/stream_cli.py --url http://127.0.0.1:9010 --api-key <KEY> --station 1001
 ```
 
 The shared secret matters as much as the tunnel: the CLI is authenticated by

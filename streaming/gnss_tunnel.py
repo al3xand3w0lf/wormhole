@@ -39,7 +39,7 @@ TWO RULES THAT ARE NOT NEGOTIABLE
 BOUND TO LOOPBACK, ALWAYS
 -------------------------
 A "temporarily open" port stays open. The operator reaches this through an SSH
-forward - the same way the admin API on :9001 is reached - so the listener has
+forward - the same way the admin API on :9010 is reached - so the listener has
 no business on a public interface.
 """
 

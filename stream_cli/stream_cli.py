@@ -2,7 +2,7 @@
 """
 stream_cli.py — interactive terminal for the streaming server's remote CLI.
 
-A thin front-end over the admin API (:9001). It does NOT talk to the device
+A thin front-end over the admin API (:9010). It does NOT talk to the device
 directly and contains no frame logic: it POSTs a command to
 `/stream/{station_id}/cli` and prints the reassembled response. The server owns
 everything hard — the CLI secret, waiting for the device's response frames,
@@ -38,7 +38,7 @@ REPL meta-commands (leading /):
 #  CONFIG — last-resort defaults; only used when .env / env / flags are absent
 #  (e.g. when this file is copied onto a host that has no repo .env)
 # ═══════════════════════════════════════════════════════════════════════
-ADMIN_URL = "http://127.0.0.1:9001"   # http(s)://<ip-or-host>:<admin-port>
+ADMIN_URL = "http://127.0.0.1:9010"   # http(s)://<ip-or-host>:<admin-port>
 API_KEY   = "changeme"                 # API key configured on the server (shared with batch)
 VERIFY_TLS = False                     # ignored for http; set True to verify a real HTTPS cert
 # ═══════════════════════════════════════════════════════════════════════

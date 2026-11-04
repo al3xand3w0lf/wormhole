@@ -33,14 +33,22 @@ ports dialog:
 | N | streaming | public | devices hold their live TCP stream here |
 | N+1 | batch upload | public | devices upload finished files over HTTP(S) and download config/firmware |
 | N+2 | NTRIP caster | public | rovers pull corrections, bases are published as mountpoints |
-| N+3 | admin API | **127.0.0.1 only**, never opened | remote CLI (`stream_cli`), device config generator, station list — from another machine through an SSH tunnel (`ssh -L N+3:127.0.0.1:N+3 user@host`) |
+| N+3 | raw stream out (component `rawout`, off by default) | public | every station's receiver data (UBX + RTCM3) live over NTRIP, mountpoint = station id, for processing elsewhere — "Raw stream out" in `README.md` |
+| N+4 … N+9 | — | | reserved for later public services |
+| N+10 | admin API | **127.0.0.1 only**, never opened | remote CLI (`stream_cli`), device config generator, station list — from another machine through an SSH tunnel (`ssh -L N+10:127.0.0.1:N+10 user@host`) |
 | 21 + 50000–50100 | FTP/FTPS (vsftpd) | public | FTP uploads/downloads into the same `data/` tree; **shared by all instances** on the host |
 
-The public ports form one range, N..N+2 (one firewall rule, one port forward on a
-router); the local admin port is last. The ports of components you do not select
+The public ports form one range, N..N+3 (one firewall rule, one port forward on a
+router); the local admin port sits at a **fixed N+10**, so a new public service
+never moves it (with "admin last" it would have moved for the raw stream out). The ports of components you do not select
 stay unused, but the block keeps its shape, so the next instance does not collide. Each port can be changed on the
 second ports screen; the name stays N. The confirm screen and
 `INSTALL_SUMMARY.txt` show this overview for the instance being installed.
+
+From 2026-10-17 to 2026-11-03 admin was N+3. Such an instance keeps it until the
+raw stream out is switched on under **Settings → Raw stream out**, which offers to
+move admin to N+10 and give the raw stream out N+3 (verified 2026-11-04, see
+"Raw stream out" below).
 
 Until 2026-10-17 the block was stream N, admin N+1, caster N+2, batch N+3, and the
 name followed the main service's port, so a batch-only block
@@ -59,7 +67,7 @@ in the registry); the FTP account is the one in its `.env`.
 | Caster | Millipede cloned and built inside the instance by the installer itself (not through `caster/setup.sh`), config from `caster/generate_config.py`. Runs as a system unit under the same user as the streaming server |
 | Firewall | ufw rules for the public ports you tick, comment `wormhole_<port> <role>`; the admin port never |
 | Registry | `/etc/wormhole/instances/<name>.conf` — ports, components, user, install answers |
-| Summary | `<dir>/INSTALL_SUMMARY.txt` (`600`): ports, credentials, the device's `CONFIG.TXT` values, SSH tunnel command |
+| Summary | `<dir>/INSTALL_SUMMARY.txt` (`600`): ports, credentials, the device's `CONFIG.TXT` values, SSH tunnel command; with `rawout` the consumer account and a ready `str2str` line |
 | Log | `~/wormhole-setup.log` of the user who ran it |
 
 ## The dialogs
@@ -67,13 +75,14 @@ in the registry); the FTP account is the one in its `.env`.
 1. **System check**: OS, systemd, Python ≥ 3.10 (the code uses `X | None` at
    runtime, so 3.9 fails on import), architecture (32-bit ARM: warning), internet,
    NTP sync, free disk, ufw state. A failure stops the install; a warning asks first.
-2. **Components**: streaming, NTRIP caster, batch, ftp (off by default). The caster
-   implies streaming; ftp implies batch — it is `tools/setup-ftp.sh`
+2. **Components**: streaming, NTRIP caster, batch, ftp and rawout (both off by
+   default). The caster and rawout imply streaming; ftp implies batch — it is `tools/setup-ftp.sh`
    (`ftp-ftps-server-2026-10-17.md`): vsftpd, one account per instance chrooted to
    `data/`, FTPS optional, firewall through ufw when the installer manages it.
 3. **Ports**: a block is suggested from the first base port (9000, 10000, …) whose
-   four ports are all free and not reserved by another registered instance;
-   stream = B, batch = B+1, caster = B+2, admin = B+3; B also names the
+   ports B..B+3 and B+10 are all free and not reserved by another registered
+   instance; stream = B, batch = B+1, caster = B+2, raw out = B+3, admin = B+10;
+   B also names the
    instance (see "Names and ports"). Each port can be changed one by one. Continuing validates them: 1024–65535, no duplicates, not
    listening (`ss`), not claimed by another instance.
 4. **Service user**: the current user (default) or a dedicated system user
@@ -127,8 +136,8 @@ bash install.sh --unattended answers.env
 ```
 
 ```ini
-COMPONENTS=streaming caster batch   # + ftp for FTP/FTPS (tools/setup-ftp.sh)
-BASE_PORT=12000            # names the instance wormhole_12000; single ports: STREAM_PORT / ADMIN_PORT / CASTER_PORT / BATCH_PORT
+COMPONENTS=streaming caster batch   # + ftp for FTP/FTPS (tools/setup-ftp.sh), + rawout for the raw stream out
+BASE_PORT=12000            # names the instance wormhole_12000; single ports: STREAM_PORT / ADMIN_PORT / CASTER_PORT / BATCH_PORT / RAWOUT_PORT
 SERVICE_USER=current       # or system
 INSTALL_DIR=/opt/wormhole_12000
 PROJECT=transfer           # optional label, see dialog 5
@@ -136,7 +145,7 @@ PUBLIC_HOST=stations.example.org
 BASE_STATIONS=1001,1002
 RAW_MAX_AGE_H=168
 SSL_MODE=none              # selfsigned | letsencrypt (+ LE_DOMAIN, LE_EMAIL)
-FW_OPEN=12000 12001 12002  # ports to open in ufw (stream, batch, caster)
+FW_OPEN=12000 12001 12002  # ports to open in ufw (stream, batch, caster; + 12003 with rawout)
 FW_ACTIVATE=no
 REPO_URL=https://github.com/al3xand3w0lf/wormhole.git
 REPO_BRANCH=main
@@ -164,6 +173,9 @@ on demand (`install.sh test <name>`, or "Run the server test" in the menu):
 - a batch test upload, found in `/uploads`, then deleted;
 - the caster answers with a sourcetable (`ENDSOURCETABLE`; empty is normal with no
   base pushing);
+- with rawout, while the test station streams (30 s instead of 20): a wrong
+  password gets `401`, the account gets a sourcetable, and
+  `tools/rawout_client.py` receives the test station's data on mountpoint 9999;
 - with ftp: the self test of `tools/setup-ftp.sh --test` (lines prefixed `ftp:`) —
   vsftpd, account, chroot, FTP and FTPS upload/download round trips;
 - `.env` and `data/` are writable by the service user, because the caster
@@ -178,8 +190,9 @@ report prints the `nc -vz` line to run from another machine.
 Status (units, since when, restart count, stations, caster mountpoints, disk) ·
 server test · generate a device `CONFIG.TXT` (`python -m configgen`, prefilled from
 this instance's `.env`) · update · restart · logs (journal, `streaming.log`,
-`server.log`, installer log) · settings (ports, `PUBLIC_HOST`, trusted bases, new
-CLI secret, raw retention, HTTPS, firewall) · install summary · uninstall.
+`server.log`, installer log) · settings (ports, raw stream out, `PUBLIC_HOST`,
+trusted bases, new CLI secret, raw retention, HTTPS, firewall) · install summary ·
+uninstall. The status report shows who reads the raw stream out.
 
 - **Update** refuses to run if tracked files have local changes. Otherwise it runs
   `git pull --ff-only`, pip, `pytest`, rebuilds and reconfigures the caster only if
@@ -188,6 +201,11 @@ CLI secret, raw retention, HTTPS, firewall) · install summary · uninstall.
 - **Settings → Ports** rewrites `.env`, regenerates `caster.yaml` if the caster
   port changed, and replaces the instance's ufw rules. It then reminds you that
   devices need the new streaming port. The instance keeps its name.
+- **Settings → Raw stream out** switches it on or off, shows the account, or
+  generates a new password. Switching it on writes only the `STREAM_RAWOUT_*`
+  keys; an account that already exists is kept, so a consumer's credentials
+  survive a repair run or an off/on. If the instance's admin API sits on N+3
+  (layout before 2026-11-04), it first offers to move admin to N+10.
 - **Settings → trusted bases** only ever *adds* to `STREAM_CASTER_STATIONS`, in
   line with the no-automatic-removal rule of the caster auto-provisioning.
 - **Uninstall** removes the units, the firewall rules, the Let's Encrypt hook,
@@ -219,6 +237,29 @@ rules; the directory stays) / abort.
   got no caster at all. Without auto-provisioning, an empty list is still refused,
   because that caster would stay empty forever
   (`tests/test_caster_generate_config.py`).
+
+## Raw stream out (2026-11-04)
+
+The component and the port-block change came with `streaming/rawout.py`
+("Raw stream out" in `README.md`). Verified on a Raspberry Pi next to a live
+production instance, whose streaming service kept its start time:
+
+- unattended install, `COMPONENTS=streaming batch rawout`, block 12000: raw out on
+  12003, admin on 12010, every check passed including the three raw-out checks
+  (401, sourcetable, 488 bytes of test station 9999), summary with account and
+  `str2str` line;
+- unattended install on block 13000 with `ADMIN_PORT=13003` (the old layout), then
+  **Settings → Raw stream out** with the default answers: admin moved to 13010, raw
+  out on 13003, registry and `.env` updated, server test passed; switched off
+  (port closed, `COMP_RAWOUT=no`, test passed) and on again with **the same
+  account**;
+- both uninstalled with `--purge`; registry and `wormhole-setup` link gone.
+
+That Pi has no ufw, so the firewall part was verified on a production host
+with ufw, by switching the raw stream out on for an installer instance with the
+old layout (admin on N+3) under Settings: admin moved to N+10, the raw stream out
+took N+3 with a ufw rule `raw-stream-out`, every server-test check passed, and an
+NTRIP client on another network received the stations' data.
 
 ## Verified (2026-09-23, on a Raspberry Pi next to a live production instance)
 

@@ -7,7 +7,7 @@ services** and do not import each other.
 | Mode | What the device does | Server | Ports | Entry point |
 |---|---|---|---|---|
 | **Batch** | uploads finished files over HTTP | file server | 8000 | `server.py` |
-| **Streaming** | live TCP byte stream | stream receiver | 9000 (TCP) + 9001 (admin) | `streaming_server.py` |
+| **Streaming** | live TCP byte stream | stream receiver | 9000 (TCP) + 9010 (admin) + 9003 (raw out, optional) | `streaming_server.py` |
 
 Run one, or both. → [Streaming Server](#streaming-server) (jump to the second half)
 
@@ -210,7 +210,7 @@ station**. All protocol intelligence lives on the server.
 ```bash
 pip install -r requirements-dev.txt
 cp .env.example .env          # set API_KEY and STREAM_CLI_SECRET
-python3 streaming_server.py   # TCP :9000 (data) + HTTP :9001 (admin)
+python3 streaming_server.py   # TCP :9000 (data) + HTTP :9010 (admin)
 pytest                        # 238 tests
 ```
 
@@ -266,7 +266,7 @@ If your device already corrects for leap seconds, adjust
 `streaming/gpstime.py::gps_to_datetime()` — it is the single place this decision lives,
 and `tests/test_gpstime.py` pins it.
 
-## Admin / CLI API (`:9001`, `X-API-Key`)
+## Admin / CLI API (`:9010`, `X-API-Key`)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -279,9 +279,9 @@ and `tests/test_gpstime.py` pins it.
 | `POST` | `/stream/{station_id}/cli` | Send a CLI command, get the reassembled response |
 
 ```bash
-curl -H "X-API-Key: <key>" http://<host>:9001/stream/stations
+curl -H "X-API-Key: <key>" http://<host>:9010/stream/stations
 
-curl -X POST http://<host>:9001/stream/1001/cli \
+curl -X POST http://<host>:9010/stream/1001/cli \
      -H "X-API-Key: <key>" -H "Content-Type: application/json" \
      -d '{"cmd": "sysinfo"}'
 ```
@@ -381,7 +381,7 @@ frames, and the full CLI flow including downloads over the stream:
 ```bash
 python3 streaming_server.py &
 python3 fake_device.py --secret <token> --duration 60
-curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
+curl -H "X-API-Key: <key>" http://127.0.0.1:9010/stream/stations
 ```
 
 ## Configuration (.env)
@@ -390,7 +390,7 @@ curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
 |----------|---------|-------------|
 | `STREAM_HOST` | `0.0.0.0` | TCP bind address |
 | `STREAM_PORT` | `9000` | Device data port |
-| `STREAM_ADMIN_PORT` | `9001` | Admin/CLI HTTP port — **do not expose publicly** |
+| `STREAM_ADMIN_PORT` | `9010` | Admin/CLI HTTP port — **do not expose publicly**. N+10 in the installer's port block; was `9001` until 2026-11-04 — an `.env` that sets it keeps its port |
 | `STREAM_DIR` | `./data/incoming_stream` | Output root |
 | `STREAM_CLI_SECRET` | *(empty)* | Pre-shared CLI token — **must match the device** |
 | `STREAM_RAW_CAPTURE` | `true` | Record the raw byte stream |
@@ -417,6 +417,12 @@ curl -H "X-API-Key: <key>" http://127.0.0.1:9001/stream/stations
 | `STREAM_CASTER_AUTO_ENABLE` | `false` | Provision a mountpoint on the **bundled** caster automatically when a station identifies with `role=base` — no `.env` edit, no restart |
 | `STREAM_CASTER_ETC_DIR` | `./caster/millipede-caster/etc` | Where the bundled caster's config lives; only the auto-provisioner writes there |
 | `STREAM_CASTER_TARGETS` | *(empty)* | Further casters to push the same stations to, by name — each configured by `STREAM_CASTER_<NAME>_{HOST,PORT,PASSWORDS,ENABLE}`. Additive to the bundled caster above |
+| `STREAM_RAWOUT_ENABLE` | `false` | Serve every station's raw receiver output (UBX + RTCM3) live over NTRIP, mountpoint = station id. See "Raw stream out" below |
+| `STREAM_RAWOUT_HOST` / `_PORT` | `0.0.0.0` / `9003` | Listener — public on purpose, unlike the admin API |
+| `STREAM_RAWOUT_USERS` | *(empty)* | `user:password:stations[,...]`, stations `*` or `1001+1020`. Empty with the listener on refuses to start |
+| `STREAM_RAWOUT_TLS` | `false` | Optional TLS with `STREAM_RAWOUT_CERTFILE` / `_KEYFILE` (default: `SSL_CERTFILE` / `SSL_KEYFILE`). Refuses to start without a certificate |
+| `STREAM_RAWOUT_CLIENT_BUFFER_KB` | `1024` | Send buffer per client before a slow client is cut off |
+| `STREAM_RAWOUT_MAX_CLIENTS` | `32` | Total connections |
 
 `API_KEY` is shared with the batch server.
 
@@ -491,9 +497,36 @@ no `.env` edit, no restart, no second `generate_config.py` run.
 An operator's own caster accounts and mountpoint credentials are still deployment data
 and belong in `.env`, never in the repo.
 
+## Raw stream out
+
+`streaming/rawout.py` serves each station's receiver output to external consumers,
+live, as an NTRIP caster would: `GET /1001` returns station 1001's UBX and RTCM3
+frames in arrival order (no private `0xF0` frames), `GET /` the sourcetable of the
+stations the account may read. NTRIP 1 and 2, Basic auth per account; plain NTRIP by
+default, TLS optional. The server does not filter: which messages are in the stream
+is the receiver's configuration. A client too slow for the stream is cut off, never
+waited for. Reception, archive and other clients are never held back.
+`GET /stream/rawout` on the admin port shows who reads what. The installer offers it
+as the component `rawout` on port N+3.
+
+```bash
+# stdlib-only reference client (NTRIP 2, reconnects by itself)
+RAWOUT_PW=... python3 tools/rawout_client.py host:9003/1001 --user proc --password @RAWOUT_PW -o 1001.ubx
+# RTKLIB
+str2str -in ntrip://proc:PW@host:9003/1001 -out file://1001.ubx
+```
+
+Why plain NTRIP by default: the content is GNSS data, and TLS costs on every
+consumer (a self-signed certificate handed around and pinned, `socat` in front of
+RTKLIB, which cannot speak TLS). The password travels in clear text, so generate one
+that guards nothing else. The admin API, which can reboot devices, stays on loopback
+either way.
+
+pygnssutils' `GNSSNTRIPClient` is **not** suitable: it filters the stream to RTCM3 and
+drops every UBX frame without an error.
+
 ## Not implemented
 
-- **Live data fan-out.**
 - **TLS on the stream socket.**
 
 The sink abstraction exists so it can be added without touching the framer or
@@ -509,12 +542,12 @@ wormhole/
 ├── downloads.py                     # Shared download dir, used by server.py + streaming/filetransfer.py
 ├── streaming_server.py              # Streaming: entry point
 ├── streaming/                       # Streaming: framer, frames, filetransfer, geo,
-│                                    #   gpstime, pipeline, rover, rover_discovery,
+│                                    #   gpstime, pipeline, rawout, rover, rover_discovery,
 │                                    #   sinks, station, server, config
 ├── replay.py                        # Streaming: replay a raw capture
 ├── fake_device.py                   # Streaming: device emulator
 ├── caster/                          # Bundled NTRIP caster (Millipede): setup.sh, generate_config.py
-├── tools/                           # ntrip_relay.py (relay a mountpoint), gnss_tunnel.py + ubx_check.py (GNSS maintenance tunnel), setup-ftp.sh (FTP/FTPS)
+├── tools/                           # ntrip_relay.py (relay a mountpoint), gnss_tunnel.py + ubx_check.py (GNSS maintenance tunnel), setup-ftp.sh (FTP/FTPS), rawout_client.py (raw stream out consumer)
 ├── configgen/                       # Device configuration generator; data/ holds an EXAMPLE schema + role templates
 ├── install.sh                       # Guided installer / manage menu (whiptail)
 ├── docs/installer-2026-09-23.md     # Installer documentation

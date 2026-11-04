@@ -2,7 +2,7 @@
 """
 gnss_tunnel.py — open, inspect and close a GNSS maintenance tunnel (K-01 Etappe 2).
 
-Front-end over the admin API (:9001), exactly like stream_cli.py: it holds no
+Front-end over the admin API (:9010), exactly like stream_cli.py: it holds no
 frame logic and never talks to a device. It asks the server to start a bridge
 session on the station and to expose that session as a local TCP port, then tells
 you what to point u-center at.

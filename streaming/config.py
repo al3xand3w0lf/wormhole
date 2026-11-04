@@ -29,7 +29,9 @@ STREAM_PORT = int(os.getenv("STREAM_PORT", "9000"))
 # to loopback by default. Sharing STREAM_HOST would put /stream/{id}/cli — reboot,
 # downloadfw — on every interface, leaving a firewall as the only thing in the way.
 STREAM_ADMIN_HOST = os.getenv("STREAM_ADMIN_HOST", "127.0.0.1")
-STREAM_ADMIN_PORT = int(os.getenv("STREAM_ADMIN_PORT", "9001"))
+# N+10 in the port block: fixed, so a new public
+# service at N+4.. never moves it. An instance that sets the key keeps its port.
+STREAM_ADMIN_PORT = int(os.getenv("STREAM_ADMIN_PORT", "9010"))
 STREAM_DIR = Path(os.getenv("STREAM_DIR", BASE_DIR / "data" / "incoming_stream"))
 
 # The address a DEVICE should dial to reach this installation.
@@ -262,6 +264,36 @@ def _caster_targets(value: str) -> tuple[CasterTarget, ...]:
 
 
 STREAM_CASTER_TARGETS = _caster_targets(os.getenv("STREAM_CASTER_TARGETS", ""))
+
+# ---- Raw receiver stream out over NTRIP (streaming/rawout.py) ----------------
+# Every station's receiver output (UBX + RTCM3, in arrival order, no private
+# 0xF0 frames), live, to external consumers. The server answers as an NTRIP
+# caster: mountpoint == station id. Public by design - unlike the admin API -
+# so it refuses to start without accounts, and with TLS on but no certificate.
+STREAM_RAWOUT_ENABLE = _bool("STREAM_RAWOUT_ENABLE", False)
+STREAM_RAWOUT_HOST = os.getenv("STREAM_RAWOUT_HOST", "0.0.0.0")
+STREAM_RAWOUT_PORT = int(os.getenv("STREAM_RAWOUT_PORT", "9003"))
+# user:password:stations, comma-separated; stations is '*' or ids joined by '+'.
+# Parsed in run() (rawout.parse_users), so a typo is reported, not a traceback.
+STREAM_RAWOUT_USERS = os.getenv("STREAM_RAWOUT_USERS", "")
+# Off by default: plain NTRIP like most public casters, so any client connects
+# with no certificate to hand around. The content is GNSS data; the password
+# travels in clear text, so use a generated one that guards nothing else.
+STREAM_RAWOUT_TLS = _bool("STREAM_RAWOUT_TLS", False)
+
+
+def _path(value: str) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+# The batch server's certificate by default - one certificate per box.
+STREAM_RAWOUT_CERTFILE = _path(os.getenv("STREAM_RAWOUT_CERTFILE", os.getenv("SSL_CERTFILE", "")))
+STREAM_RAWOUT_KEYFILE = _path(os.getenv("STREAM_RAWOUT_KEYFILE", os.getenv("SSL_KEYFILE", "")))
+STREAM_RAWOUT_CLIENT_BUFFER_KB = int(os.getenv("STREAM_RAWOUT_CLIENT_BUFFER_KB", "1024"))
+STREAM_RAWOUT_MAX_CLIENTS = int(os.getenv("STREAM_RAWOUT_MAX_CLIENTS", "32"))
 
 LOG_FILE = os.getenv("STREAM_LOG_FILE", str(BASE_DIR / "streaming.log"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
